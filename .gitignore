@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+videos/*.mp4
+videos/*.avi
+videos/*.mov
+data/
+output/
+exports/
+*.egg-info/
+.idea/
+test_frame.jpg
+test_result.jpg
