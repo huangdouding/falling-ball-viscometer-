@@ -1,14 +1,30 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+
+# Build artifacts
+dist/
+build/
+*.spec
+
+# IDE
+.idea/
+.vscode/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Project data
 videos/*.mp4
 videos/*.avi
 videos/*.mov
 data/
 output/
 exports/
-*.egg-info/
-.idea/
+
+# Test frames
 test_frame.jpg
 test_result.jpg

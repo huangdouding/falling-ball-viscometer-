@@ -392,3 +392,50 @@ GUI 基于 PySide6，主要功能区：
 - scipy >= 1.10
 - PyYAML >= 6.0
 - PySide6 >= 6.11
+
+## 构建与打包
+
+项目使用 **PyInstaller** 构建跨平台可执行文件，通过 GitHub Actions CI 自动完成。
+
+### 从源码运行
+
+```bash
+pip install -r requirements.txt
+python gui_app.py     # GUI 模式
+python main.py --config config.yaml   # 命令行模式
+```
+
+### 本地构建可执行文件
+
+```bash
+pip install pyinstaller
+
+# Windows
+pyinstaller --name "Viscometer" --onedir --add-data "config.yaml;." --collect-all PySide6 --collect-all cv2 gui_app.py
+
+# macOS
+pyinstaller --name "Viscometer" --onedir --windowed --add-data "config.yaml:." --collect-all PySide6 --collect-all cv2 gui_app.py
+```
+
+### CI 自动构建（推荐）
+
+推送 tag 自动触发 GitHub Actions 构建：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+构建产物将自动发布到 GitHub Releases 页面。也可在 Actions 页面手动触发 `workflow_dispatch`。
+
+### 下载预构建包
+
+访问 [Releases](https://github.com/huangdouding/falling-ball-viscometer-/releases) 页面下载：
+
+| 平台 | 文件 | 说明 |
+|------|------|------|
+| Windows | `Viscometer-Windows.zip` | 解压后运行 `Viscometer.exe` |
+| macOS | `Viscometer-macOS.dmg` | 挂载后将 App 拖入 Applications 文件夹 |
+
+> **macOS 注意**：首次运行需右键 → 打开以绕过 Gatekeeper 签名检查。
+> **Windows 注意**：如遇 Windows Defender 提示，选择"仍要运行"即可。

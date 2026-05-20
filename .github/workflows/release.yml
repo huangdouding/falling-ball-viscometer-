@@ -1,0 +1,174 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: false
+        type: string
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller `
+            --name "Viscometer" `
+            --onedir `
+            --add-data "config.yaml;." `
+            --hidden-import "src" `
+            --hidden-import "src.gui" `
+            --hidden-import "src.ball_detector" `
+            --hidden-import "src.ball_tracker" `
+            --hidden-import "src.tracking" `
+            --hidden-import "src.viscosity" `
+            --hidden-import "src.velocity" `
+            --hidden-import "src.terminal_region" `
+            --hidden-import "src.terminal_velocity" `
+            --hidden-import "src.plotting" `
+            --hidden-import "src.report" `
+            --hidden-import "src.utils" `
+            --hidden-import "src.video_io" `
+            --hidden-import "src.roi_manager" `
+            --hidden-import "src.background_model" `
+            --hidden-import "src.candidate_detector" `
+            --hidden-import "src.interval_selector" `
+            --hidden-import "src.trajectory_filter" `
+            --hidden-import "src.ball_geometry" `
+            --hidden-import "src.pipeline" `
+            --collect-all "PySide6" `
+            --collect-all "cv2" `
+            gui_app.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Viscometer-Windows
+          path: dist/Viscometer/
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          brew install create-dmg
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller \
+            --name "Viscometer" \
+            --onedir \
+            --windowed \
+            --add-data "config.yaml:." \
+            --hidden-import "src" \
+            --hidden-import "src.gui" \
+            --hidden-import "src.ball_detector" \
+            --hidden-import "src.ball_tracker" \
+            --hidden-import "src.tracking" \
+            --hidden-import "src.viscosity" \
+            --hidden-import "src.velocity" \
+            --hidden-import "src.terminal_region" \
+            --hidden-import "src.terminal_velocity" \
+            --hidden-import "src.plotting" \
+            --hidden-import "src.report" \
+            --hidden-import "src.utils" \
+            --hidden-import "src.video_io" \
+            --hidden-import "src.roi_manager" \
+            --hidden-import "src.background_model" \
+            --hidden-import "src.candidate_detector" \
+            --hidden-import "src.interval_selector" \
+            --hidden-import "src.trajectory_filter" \
+            --hidden-import "src.ball_geometry" \
+            --hidden-import "src.pipeline" \
+            --collect-all "PySide6" \
+            --collect-all "cv2" \
+            gui_app.py
+
+      - name: Create DMG
+        run: |
+          create-dmg \
+            --volname "Viscometer" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "Viscometer.app" 150 190 \
+            --hide-extension "Viscometer.app" \
+            --app-drop-link 450 190 \
+            "Viscometer-macOS.dmg" \
+            "dist/Viscometer.app"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Viscometer-macOS
+          path: Viscometer-macOS.dmg
+
+  create-release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Zip Windows build
+        run: |
+          cd Viscometer-Windows
+          zip -r ../Viscometer-Windows.zip .
+          cd ..
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Viscometer ${{ github.ref_name }}
+          body: |
+            ## 落球法液体黏度自动测量系统 ${{ github.ref_name }}
+
+            ### 下载说明
+            - **Windows**: 下载 `Viscometer-Windows.zip`，解压后运行 `Viscometer.exe`
+            - **macOS**: 下载 `Viscometer-macOS.dmg`，打开后将 Viscometer.app 拖入 Applications 文件夹
+
+            ### 系统要求
+            - **Windows**: Windows 10/11，64-bit
+            - **macOS**: macOS 11 (Big Sur) 或更高版本，Apple Silicon 或 Intel
+
+            ### 使用说明
+            1. 解压/安装后首次运行可能需要较长时间加载
+            2. macOS 用户首次打开可能需要右键 → 打开以绕过 Gatekeeper
+            3. Windows 用户如遇安全提示请选择"仍要运行"
+          files: |
+            Viscometer-Windows.zip
+            Viscometer-macOS.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
