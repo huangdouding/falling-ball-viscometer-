@@ -148,6 +148,11 @@ jobs:
           zip -r ../Viscometer-Windows.zip .
           cd ..
 
+      - name: Prepare macOS DMG
+        run: |
+          ls -la Viscometer-macOS/
+          cp Viscometer-macOS/Viscometer-macOS.dmg .
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
