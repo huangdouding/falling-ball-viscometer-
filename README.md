@@ -171,15 +171,23 @@ python main.py --config config.yaml
 
 ### 理想黏度（斯托克斯定律）
 
-$$ \eta_{\infty} = \frac{(\rho_b - \rho_l) \cdot g \cdot d^2}{18 \cdot v_t} $$
+$$ \eta_{\text{basic}} = \frac{2 \cdot r^2 \cdot g \cdot (\rho_s - \rho_l)}{9 \cdot v_t} $$
 
-### 管壁修正
+其中 r 为小球半径，ρ_s 为小球密度，ρ_l 为液体密度，v_t 为终端速度。
 
-考虑量筒壁面对小球沉降的阻滞效应：
+### 管壁与液高修正（Ladenburg 公式）
 
-$$ \eta = \eta_{\infty} \left[ 1 - 2.104 \cdot \frac{r}{R} + 2.09 \cdot \left(\frac{r}{R}\right)^3 - 0.95 \cdot \left(\frac{r}{R}\right)^5 \right] $$
+考虑量筒壁面和液柱高度对小球沉降的阻滞效应：
 
-其中 r 为小球半径，R 为量筒内半径。由 `enable_wall_correction` 控制开关。
+$$ \eta_{\text{wall}} = \frac{\eta_{\text{basic}}}{(1 + 2.4 \cdot \frac{r}{R}) \cdot (1 + 3.3 \cdot \frac{r}{h})} $$
+
+| 符号 | 含义 |
+|------|------|
+| r | 小球半径 |
+| R | 量筒内半径 |
+| h | 液柱高度 |
+
+由 `enable_wall_correction` 控制开关。修正因子 > 1.10 时输出警告。
 
 ## 配置参数
 
