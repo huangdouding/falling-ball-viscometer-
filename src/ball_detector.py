@@ -74,7 +74,16 @@ class BallDetector:
         self._predicted_cy: Optional[float] = None
         self._velocity_x: float = 0.0  # px/frame (ROI 坐标)
         self._velocity_y: float = 0.0
+        self._prev_velocity_x: float = 0.0
+        self._prev_velocity_y: float = 0.0
+        self._acceleration_x: float = 0.0  # px/frame²
+        self._acceleration_y: float = 0.0
         self._consecutive_lost: int = 0
+
+        # 自适应搜索窗口基础尺寸（动态调整用）
+        self._search_win_base_w = self.search_win_w
+        self._search_win_base_y_up = self.search_win_y_up
+        self._search_win_base_y_down = self.search_win_y_down
 
         # ---------- ROI（使用 detect_roi 做物理裁剪，回退到 roi） ----------
         self.roi = config.get("roi")
@@ -112,6 +121,16 @@ class BallDetector:
         # Blob detector 参数根据模式调整
         self._blob_params = self._make_blob_params()
         self._blob_detector = cv2.SimpleBlobDetector_create(self._blob_params)
+
+        # ---------- 模板匹配（Tracker 风格） ----------
+        self._template_enabled = config.get("template_enabled", True)
+        self._template_evolve_alpha = float(config.get("template_evolve_alpha", 0.20))
+        self._template_tether_alpha = float(config.get("template_tether_alpha", 0.05))
+        self._template_match_threshold = float(config.get("template_match_threshold", 0.50))
+        self._template_size_factor = float(config.get("template_size_factor", 2.5))
+        self._template_gray = None          # 当前进化模板（ROI 坐标灰度图）
+        self._template_original = None      # 原始关键帧模板（永不改变，用于 tether）
+        self._template_half = 0             # 模板半宽
 
     # ================================================================
     #  BlobDetector 参数
@@ -218,9 +237,9 @@ class BallDetector:
             before_sw = len(candidates)
 
             # 非对称窗口：x ± search_win_w, y 向下 search_win_y_down, 向上 search_win_y_up
-            wx = self.search_win_w
-            wy_up = self.search_win_y_up
-            wy_down = self.search_win_y_down
+            # 动态窗口：高模板置信度时缩小，丢帧后扩大
+            best_tm_score = max((c.get("template_match_score", -1.0) for c in candidates), default=-1.0)
+            wx, wy_up, wy_down = self._compute_search_window(best_tm_score)
             candidates = [c for c in candidates
                           if abs(c["cx"] - scx) <= wx
                           and -wy_up <= (c["cy"] - scy) <= wy_down]
@@ -250,9 +269,9 @@ class BallDetector:
                 pred_x_roi = pred_x
                 pred_y_roi = pred_y
                 # 更新内部状态保证追踪连续性（使用 ROI 坐标）
-                self._prev_cx = pred_x_roi
-                self._prev_cy = pred_y_roi
-                self._consecutive_lost += 1
+                # ★ 不再在 detect() 内部更新追踪状态。
+                # tracking.py 通过 _accept_prediction() 决策是否使用预测点，
+                # 只有 tracking.py 确认的 valid raw 点才会通过 set_prev() 更新状态。
                 # 用预测位置构造一个"软"候选，评分较低但能让追踪继续
                 fallback_radius = (self.expected_radius_px_min + self.expected_radius_px_max) / 2.0
                 fallback_area = np.pi * fallback_radius ** 2
@@ -1236,8 +1255,20 @@ class BallDetector:
                 ll_penalty, ll_reason = self._reject_long_line_v2(gray, cx, cy, r)
             c["long_line_penalty"] = ll_penalty
 
+            # 10. 模板匹配分 (0~35) — 归一化互相关，抗杂光关键
+            tm_score = -1.0
+            if gray is not None and self._template_gray is not None:
+                tm_score = self._compute_template_match_score(gray, cx, cy)
+            c["template_match_score"] = tm_score
+
             # ---- 被静态/结构剔除（低 diff + 长线 + 低 continuity） ----
             reject_reasons = []
+            if self._template_gray is not None and tm_score >= 0:
+                tm_thresh = self._template_match_threshold
+                if self.large_ball_mode:
+                    tm_thresh *= 0.7
+                if tm_score < tm_thresh:
+                    reject_reasons.append(f"template_mismatch(tm={tm_score:.2f})")
             if diff_map is not None:
                 if diff_score < 2.0 and not self.large_ball_mode:
                     reject_reasons.append("static_background")
@@ -1254,7 +1285,7 @@ class BallDetector:
                 reject_reasons.append("low_contrast+static")
             c["reject_reason"] = "; ".join(reject_reasons) if reject_reasons else ""
 
-            # ---- 总分（大球模式适当调低总分要求） ----
+            # ---- 总分 ----
             raw = (diff_score + pred_score + continuity + iso_score
                    + size_score + ax_score + cb_score
                    + motion_bonus + contrast_score - ll_penalty)
@@ -1263,6 +1294,12 @@ class BallDetector:
                 raw -= 6.0
             if self.large_ball_mode:
                 raw += 10.0
+
+            # ★ 模板匹配加权：相关系数直接乘总分（低分候选被强力压制）
+            if self._template_gray is not None and tm_score >= 0:
+                tm_mult = max(0.3, tm_score)  # 0→0.3x, 0.5→0.5x, 1→1x
+                raw *= tm_mult
+
             c["score"] = max(0.0, raw)
 
         candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -1491,13 +1528,26 @@ class BallDetector:
         self._predicted_cy = None
         self._velocity_x = 0.0
         self._velocity_y = 0.0
+        self._prev_velocity_x = 0.0
+        self._prev_velocity_y = 0.0
+        self._acceleration_x = 0.0
+        self._acceleration_y = 0.0
         self._consecutive_lost = 0
+        self._template_gray = None
+        self._template_original = None
+        self._template_half = 0
 
     def set_prev(self, cx: float, cy: float):
         """设置上一帧的检测结果，更新速度估计并预测下一帧搜索中心。"""
         if self._prev_cx is not None and self._prev_cy is not None:
-            self._velocity_x = cx - self._prev_cx
-            self._velocity_y = cy - self._prev_cy
+            new_vx = cx - self._prev_cx
+            new_vy = cy - self._prev_cy
+            self._acceleration_x = new_vx - self._velocity_x
+            self._acceleration_y = new_vy - self._velocity_y
+            self._prev_velocity_x = self._velocity_x
+            self._prev_velocity_y = self._velocity_y
+            self._velocity_x = new_vx
+            self._velocity_y = new_vy
 
         self._prev_cx = cx
         self._prev_cy = cy
@@ -1537,13 +1587,28 @@ class BallDetector:
         self.search_win_y_up = y_up
         self.search_win_y_down = y_down
 
+    def _compute_search_window(self, template_score: float = -1.0) -> tuple:
+        """根据置信度动态计算搜索窗口大小。"""
+        if self._consecutive_lost > 0:
+            scale = [1.5, 2.5, 4.0, 6.0][min(self._consecutive_lost - 1, 3)]
+        elif template_score >= 0.65:
+            # 高模板匹配置信度 → 小窗口精确追踪
+            scale = 1.0 / 3.0
+        else:
+            scale = 1.0
+        wx = max(15, int(self._search_win_base_w * scale))
+        wy_up = max(5, int(self._search_win_base_y_up * scale))
+        wy_down = max(15, int(self._search_win_base_y_down * scale))
+        return wx, wy_up, wy_down
+
     def predict_next_position(self) -> Tuple[Optional[float], Optional[float]]:
-        """基于当前位置和速度预测下一帧位置。"""
+        """基于位置、速度、加速度预测下一帧位置（2 阶）。"""
         if self._prev_cx is None:
             return None, None
         dt = 1.0  # 假设 1 帧间隔
-        pred_x = self._prev_cx + self._velocity_x * dt
-        pred_y = self._prev_cy + self._velocity_y * dt
+        # pos + v*dt + 0.5*a*dt²
+        pred_x = self._prev_cx + self._velocity_x * dt + 0.5 * self._acceleration_x * dt * dt
+        pred_y = self._prev_cy + self._velocity_y * dt + 0.5 * self._acceleration_y * dt * dt
         return pred_x, pred_y
 
     def get_fall_axis_x(self) -> Optional[float]:
@@ -1553,3 +1618,137 @@ class BallDetector:
     def set_fall_axis_x(self, x: float):
         """设置下落中心线（全局坐标）。"""
         self.fall_axis_x = x
+
+    # ================================================================
+    #  模板匹配（Tracker 风格归一化互相关）
+    # ================================================================
+
+    def has_template(self) -> bool:
+        """是否已有模板。"""
+        return self._template_gray is not None
+
+    def set_template(self, bgr_frame: np.ndarray, global_cx: float, global_cy: float) -> bool:
+        """从全帧 BGR 图像中提取模板，自动处理 ROI 裁剪。"""
+        gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
+
+        # ROI 裁剪（与 detect() 一致）
+        crop_roi = self.detect_roi if self.detect_roi is not None else self.roi
+        if crop_roi is not None:
+            x, y, w, h = [int(v) for v in crop_roi]
+            x = max(0, x); y = max(0, y)
+            w = min(w, gray.shape[1] - x)
+            h = min(h, gray.shape[0] - y)
+            if w > 0 and h > 0:
+                roi_gray = gray[y:y + h, x:x + w].copy()
+            else:
+                roi_gray = gray.copy()
+            roi_cx = global_cx - x
+            roi_cy = global_cy - y
+        else:
+            roi_gray = gray.copy()
+            roi_cx, roi_cy = global_cx, global_cy
+
+        # 模板尺寸基于预期半径
+        exp_r = (self.expected_radius_px_min + self.expected_radius_px_max) / 2.0
+        t_size = max(9, int(exp_r * self._template_size_factor))
+        if t_size % 2 == 0:
+            t_size += 1
+        half = t_size // 2
+        self._template_half = half
+
+        h_roi, w_roi = roi_gray.shape
+        x0 = max(0, int(roi_cx) - half)
+        y0 = max(0, int(roi_cy) - half)
+        x1 = min(w_roi, int(roi_cx) + half + 1)
+        y1 = min(h_roi, int(roi_cy) + half + 1)
+
+        template = roi_gray[y0:y1, x0:x1].astype(np.float32)
+        if template.shape[0] < 3 or template.shape[1] < 3:
+            self._template_gray = None
+            return False
+
+        self._template_gray = template
+        self._template_original = template.copy()
+        return True
+
+    def evolve_template(self, bgr_frame: np.ndarray, global_cx: float, global_cy: float) -> bool:
+        """进化模板：首次调用设模板，后续进化（evolve + tether）。"""
+        if self._template_gray is None:
+            return self.set_template(bgr_frame, global_cx, global_cy)
+
+        if not self._template_enabled:
+            return False
+
+        gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
+
+        # ROI 裁剪
+        crop_roi = self.detect_roi if self.detect_roi is not None else self.roi
+        if crop_roi is not None:
+            x, y, w, h = [int(v) for v in crop_roi]
+            x = max(0, x); y = max(0, y)
+            w = min(w, gray.shape[1] - x)
+            h = min(h, gray.shape[0] - y)
+            if w > 0 and h > 0:
+                gray = gray[y:y + h, x:x + w].copy()
+            roi_cx = global_cx - x
+            roi_cy = global_cy - y
+        else:
+            roi_cx, roi_cy = global_cx, global_cy
+
+        half = self._template_half
+        h_roi, w_roi = gray.shape
+        x0 = max(0, int(roi_cx) - half)
+        y0 = max(0, int(roi_cy) - half)
+        x1 = min(w_roi, int(roi_cx) + half + 1)
+        y1 = min(h_roi, int(roi_cy) + half + 1)
+
+        new_patch = gray[y0:y1, x0:x1].astype(np.float32)
+        if new_patch.shape != self._template_gray.shape:
+            return False  # 尺寸不匹配，跳过本帧进化
+
+        # evolve: 新匹配以一定比例融入模板
+        evolve = self._template_evolve_alpha
+        self._template_gray = (1 - evolve) * self._template_gray + evolve * new_patch
+
+        # tether: 将模板拉回原始关键帧，防止漂移
+        tether = self._template_tether_alpha
+        self._template_gray = (1 - tether) * self._template_gray + tether * self._template_original
+
+        return True
+
+    def clear_template(self):
+        """清除模板。"""
+        self._template_gray = None
+        self._template_original = None
+        self._template_half = 0
+
+    def _compute_template_match_score(self, gray: np.ndarray, cx: float, cy: float) -> float:
+        """对候选位置计算模板匹配归一化互相关分数 [0, 1]。
+
+        gray: ROI 裁剪后的灰度图（在 _score_candidates 中调用，候选坐标为 ROI 坐标）
+        cx, cy: 候选中心（ROI 坐标）
+        """
+        if self._template_gray is None or not self._template_enabled:
+            return -1.0  # 无模板
+
+        half = self._template_half
+        # 在候选周围裁一个稍大的区域做滑动匹配，容忍轻微定位偏差
+        margin = max(2, half // 2)
+        search_r = half + margin
+
+        h_roi, w_roi = gray.shape
+        x0 = max(0, int(cx) - search_r)
+        y0 = max(0, int(cy) - search_r)
+        x1 = min(w_roi, int(cx) + search_r + 1)
+        y1 = min(h_roi, int(cy) + search_r + 1)
+
+        roi = gray[y0:y1, x0:x1]
+        t_h, t_w = self._template_gray.shape
+        if roi.shape[0] < t_h or roi.shape[1] < t_w:
+            return 0.0
+
+        # 归一化互相关
+        result = cv2.matchTemplate(
+            roi.astype(np.float32), self._template_gray, cv2.TM_CCOEFF_NORMED
+        )
+        return float(result.max())

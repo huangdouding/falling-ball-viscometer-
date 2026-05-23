@@ -28,6 +28,8 @@ class AnalysisWorker(QThread):
 
     progress = Signal(str)          # 状态消息
     frame_processed = Signal(int, int)  # (current, total)
+    frame_data = Signal(int, float, float, float, float, bool, bool)
+    # (frame_idx, x_px, y_px, t_s, radius_px, is_valid, is_fallback)
     finished = Signal(dict)         # 分析结果
     error = Signal(str)             # 错误消息
 
@@ -136,7 +138,18 @@ class AnalysisWorker(QThread):
                 return
 
             # ---- 旧版管线 (默认) ----
-            proc_result = process_video(self._video_path, config)
+            def _frame_callback(frame_idx, x_px, y_px, time_s, radius_px, is_valid, is_fallback):
+                if self._is_cancelled:
+                    return
+                # 仅发射有效检测数据（None 无法转为 Qt float 信号）
+                if is_valid and x_px is not None and y_px is not None:
+                    try:
+                        self.frame_data.emit(frame_idx, float(x_px), float(y_px),
+                                             float(time_s), float(radius_px or 0),
+                                             True, bool(is_fallback))
+                    except Exception:
+                        pass
+            proc_result = process_video(self._video_path, config, frame_callback=_frame_callback)
             traj_df = proc_result["traj_df"]
             if self._is_cancelled:
                 return

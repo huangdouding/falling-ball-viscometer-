@@ -33,6 +33,14 @@ MAX_CV = 0.05                          # 速度变异系数阈值 Cv = σ/v̄
 MIN_R2 = 0.995                         # 线性拟合 R² 阈值
 SMOOTH_WINDOW = 5                      # 速度平滑窗口
 
+# ---------- 模板匹配 (Tracker 风格 NCC) ----------
+TEMPLATE_ENABLED = True                # 是否启用模板匹配
+TEMPLATE_EVOLVE_ALPHA = 0.20           # 模板进化率 (0~1)，越高模板更新越快
+TEMPLATE_TETHER_ALPHA = 0.05           # 模板回拽率 (0~1)，越高越拉回初始帧
+TEMPLATE_MATCH_THRESHOLD = 0.50        # 模板匹配最低相关系数 (0~1)
+TEMPLATE_TRUST_THRESHOLD = 0.65        # 模板匹配信任阈值 ≥ 此值则跳过运动门控
+TEMPLATE_SIZE_FACTOR = 2.5             # 模板尺寸 = 球半径 * 该系数
+
 # ---------- 黏度参数 (Phase 5) ----------
 BALL_DIAMETER_MM = 2.0                 # 小球直径 (mm)
 BALL_DENSITY = 7.86                    # 小球密度 (g/cm³)

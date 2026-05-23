@@ -163,7 +163,7 @@ def _compute_dynamic_tracking_params(config: dict):
     )
 
 
-def process_video(video_path: str, config: dict) -> dict:
+def process_video(video_path: str, config: dict, *, frame_callback=None) -> dict:
     """处理视频，逐帧追踪小球，返回轨迹 DataFrame 和统计量。
 
     追踪策略（v5 预测容错版）：
@@ -304,6 +304,15 @@ def process_video(video_path: str, config: dict) -> dict:
         logger.info("使用手动指定的初始小球位置: (%.0f, %.0f) → ROI (%.0f, %.0f)",
                     init_x, init_y, init_x_roi, init_y_roi)
 
+    # ★ 初始位置等待：需连续多帧向下运动才确认小球到达，防止静止特征误确认
+    _init_waiting = init_x is not None
+    _init_confirm_frames = int(config.get("init_ball_confirm_frames", 5))
+    _init_confirm_buf = []  # [{x, y, frame}], 累积在 init_ball 附近的候选点
+    # 默认阈值 = 5 × ball_radius_px（用户要求最多 5 个球半径），最小 15px
+    _exp_r = config.get("_expected_radius_px", 5.0)
+    _init_dist_thresh = float(config.get("init_ball_distance_px",
+                                          max(15.0, 5.0 * _exp_r)))
+
     # ---- 追踪参数 ----
     max_lost_frames = config.get("max_lost_frames", 30)
 
@@ -338,19 +347,31 @@ def process_video(video_path: str, config: dict) -> dict:
     STATE_STOPPED = "stopped"
 
     def _accept_prediction(record: dict, reason: str) -> bool:
-        """Use a short-term motion prediction to keep the search window moving.
+        """使用短期运动预测保持搜索窗口移动。
 
-        Predicted points are marked explicitly and are not counted as raw
-        detections for velocity/viscosity fitting. They only preserve tracking
-        continuity through brief missed or wrong detections.
+        Predicted 点标记为 "predicted"，不计入 raw detection rate。
+        仅用于在短暂丢帧时保持追踪连续性。
+
+        ★ 连续 predicted ≥ max_consecutive_pred 帧后强制进 REACQUIRE，
+        并在整个 ROI 内重新搜索真实 raw 点。
+        Predicted 点不更新 detector 的搜索中心/预测状态，
+        避免预测位置污染真实追踪。
         """
         nonlocal last_valid_x, last_valid_y, last_valid_frame, lost_counter, frame_state
+        nonlocal consecutive_predicted
 
         if not bool(config.get("enable_prediction_fill", False)):
             return False
 
         max_pred = int(config.get("predict_max_frames", 18))
         if lost_counter >= max_pred:
+            return False
+
+        max_consecutive_pred = int(config.get("max_consecutive_predicted", 4))
+        if consecutive_predicted >= max_consecutive_pred:
+            # 连续预测太多，强制全 ROI 搜索
+            detector.clear_search_center()
+            frame_state = STATE_REACQUIRE
             return False
 
         pred = _predict_from_recent_points(records, frame_idx, config)
@@ -369,13 +390,13 @@ def process_video(video_path: str, config: dict) -> dict:
         record["valid"] = True
         record["point_type"] = "predicted"
         record["rejection"] = reason
-        record["frame_state"] = STATE_LOST if lost_counter < 5 else STATE_REACQUIRE
+        record["frame_state"] = STATE_LOST if consecutive_predicted < max_consecutive_pred else STATE_REACQUIRE
 
         last_valid_x = px
         last_valid_y = py
         last_valid_frame = frame_idx
-        detector.set_search_center(px - crop_offset_x, py - crop_offset_y)
-        detector.set_prev(px - crop_offset_x, py - crop_offset_y)
+        # ★ predicted 点不更新 detector 搜索中心，不污染真实追踪状态
+        consecutive_predicted += 1
         return True
 
     # 标注视频
@@ -408,6 +429,32 @@ def process_video(video_path: str, config: dict) -> dict:
     reacquire_success = 0
     startup_candidate = None
     startup_candidate_count = 0
+    # ★ 启动确认缓冲区：收集首帧候选点用于 tracklet 验证
+    consecutive_predicted = 0  # ★ 连续 predicted 帧计数，超限进 REACQUIRE
+    startup_confirmed = False  # ★ 启动 tracklet 已确认/超时回退
+    startup_buffer = []  # list of {x, y, diff, frame}
+    # 函数：验证启动 tracklet 是否有持续向下运动
+    def _startup_tracklet_confirmed(buf: list) -> bool:
+        min_frames = int(config.get("startup_confirm_frames", 5))
+        if len(buf) < min_frames:
+            return False
+        recent = buf[-min_frames:]
+        ys = [p["y"] for p in recent]
+        xs = [p["x"] for p in recent]
+        # 大部分帧应向下运动 (dy > -3 容忍微抖)
+        dy_list = [ys[i + 1] - ys[i] for i in range(len(ys) - 1)]
+        if sum(1 for d in dy_list if d > -3) < len(dy_list) * 0.6:
+            return False
+        # 总向下位移 ≥ 阈值
+        if ys[-1] - ys[0] < float(config.get("min_startup_dy_px", 8.0)):
+            return False
+        # x 不剧烈漂移
+        if max(xs) - min(xs) > float(config.get("startup_max_x_drift_px", 35.0)):
+            return False
+        # 非纯静止点 (y 变化 ≤ 2px)
+        if max(ys) - min(ys) < 3.0:
+            return False
+        return True
     # 拒绝原因日志（按帧输出）
     reject_log = []
     # 逐帧候选点收集（用于 candidate_debug.csv）
@@ -468,6 +515,91 @@ def process_video(video_path: str, config: dict) -> dict:
         # 执行检测
         result = detector.detect(frame, frame_idx)
 
+        # ★ 强制 ROI 边界过滤：拒绝 user_roi 外的候选（belt-and-suspenders 保护）
+        if user_roi is not None and result["found"]:
+            _rx, _ry, _rw, _rh = user_roi
+            _rx2, _ry2 = _rx + _rw, _ry + _rh
+            _filtered = [c for c in result.get("candidates", [])
+                         if _rx <= c.get("cx", 0) <= _rx2
+                         and _ry <= c.get("cy", 0) <= _ry2]
+            if not _filtered:
+                result["found"] = False
+                result["candidates"] = []
+            else:
+                result["candidates"] = _filtered
+                # 更新最佳候选为 ROI 内第一候选
+                result["x_px"] = _filtered[0]["cx"]
+                result["y_px"] = _filtered[0]["cy"]
+
+        # ★ 初始位置等待：需要连续 N 帧在 init_ball 附近 + 向下运动才确认
+        # 只靠距离判断会被静止特征（刻度线/反光）误确认
+        if _init_waiting and result["found"]:
+            if result.get("fallback", False):
+                result["found"] = False
+                detector.set_prev(init_x_roi, init_y_roi)
+                detector.clear_search_center()
+                _init_confirm_buf.clear()
+            else:
+                _bc = result.get("candidates", [{}])[0] if result.get("candidates") else {}
+                _cx = float(_bc.get("cx", 0))
+                _cy = float(_bc.get("cy", 0))
+                _ud = np.hypot(_cx - init_x, _cy - init_y)
+                if _ud > _init_dist_thresh:
+                    # 不在范围内 → 清空缓冲区，继续等待
+                    result["found"] = False
+                    detector.set_prev(init_x_roi, init_y_roi)
+                    detector.clear_search_center()
+                    _init_confirm_buf.clear()
+                else:
+                    # 在范围内 → 累积到确认缓冲区
+                    _init_confirm_buf.append({"x": _cx, "y": _cy, "frame": frame_idx})
+                    # 缓冲区过长（>15帧静止不动）→ 清空，等真小球
+                    if len(_init_confirm_buf) > 15:
+                        ys_stale = [p["y"] for p in _init_confirm_buf]
+                        if max(ys_stale) - min(ys_stale) < 3.0:
+                            if frame_idx < 100 or frame_idx % 100 == 0:
+                                logger.debug("帧 %d: 静止特征在 init_ball 附近(disp=%.1fpx)，清空缓冲区等待真小球",
+                                            frame_idx, max(ys_stale) - min(ys_stale))
+                            _init_confirm_buf.clear()
+                    # 检查是否满足确认条件：连续 N 帧持续向下运动
+                    if len(_init_confirm_buf) >= _init_confirm_frames:
+                        recent = _init_confirm_buf[-_init_confirm_frames:]
+                        ys = [p["y"] for p in recent]
+                        # 逐帧检查：相邻帧 dy > -0.5px（允许微抖但不允许明显回退）
+                        dy_list = [ys[i + 1] - ys[i] for i in range(len(ys) - 1)]
+                        n_down = sum(1 for d in dy_list if d > -0.5)
+                        y_std = float(np.std(ys))
+                        # 确认条件：绝大部分帧向下 + 位置有变化（非静止） + 总体向下
+                        if n_down >= len(dy_list) and y_std > 0.5 and ys[-1] > ys[0]:
+                            _init_waiting = False
+                            logger.info("帧 %d: 初始小球已确认 (dist=%.0fpx, dy=%.1fpx, σ=%.1fpx over %d帧)，开始追踪",
+                                        frame_idx, _ud, ys[-1] - ys[0], y_std, _init_confirm_frames)
+                            _init_confirm_buf.clear()
+                        else:
+                            result["found"] = False
+                    else:
+                        # 缓冲区未满 → 本帧不算找到
+                        result["found"] = False
+
+        # ★ 首次检测到小球时设置模板（须 init_ball 已确认 + 不在等待阶段）
+        if result["found"] and detector._template_gray is None and not _init_waiting:
+            _best_cand = result.get("candidates", [{}])[0]
+            _cx = _best_cand.get("cx")
+            _cy = _best_cand.get("cy")
+            if _cx is not None and _cy is not None:
+                detector.set_template(frame, float(_cx), float(_cy))
+                logger.info("帧 %d: 首次检测 → 模板已设置 (cx=%.1f, cy=%.1f)", frame_idx, float(_cx), float(_cy))
+
+        # ★ 调试：打印头 30 帧的模板匹配分
+        if frame_idx < 30 and result["found"]:
+            _top = result.get("candidates", [{}])[0]
+            _tm = _top.get("template_match_score", -1.0)
+            _sc = _top.get("score", 0)
+            _src = _top.get("source", "?")
+            logger.info("帧 %d: tm_score=%.3f  ball_score=%.0f  src=%s  cx=%.0f cy=%.0f",
+                        frame_idx, _tm, _sc, _src,
+                        _top.get("cx", 0), _top.get("cy", 0))
+
         # ---- 记录本帧拒绝原因 ----
         rejection = ""
         is_fallback = result.get("fallback", False)
@@ -521,6 +653,13 @@ def process_video(video_path: str, config: dict) -> dict:
                 _fc = result.get("candidates", [{}])
                 selected_diff_score = _fc[0].get("diff_score", 0.0) if _fc else 0.0
             confidence = result.get("confidence", 0.0)
+
+            # ★ 模板匹配分数提取（用于后续跳过运动门控）
+            _best_cand = result.get("candidates", [{}])[0] if result.get("candidates") else {}
+            tm_score = _best_cand.get("template_match_score", -1.0)
+            if motion_choice is not None:
+                tm_score = motion_choice.get("template_match_score", tm_score)
+            tm_trust = float(config.get("template_trust_threshold", 0.65))
 
             # ---- 异常检测 ----
             is_anomaly = False
@@ -653,23 +792,39 @@ def process_video(video_path: str, config: dict) -> dict:
                                             f"(dx={out_dx:.1f},dy={out_dy:.1f},dist={out_dist:.1f})"
                                         )
 
-                # ★ 3. 初始捕获：无有效轨迹时直接接受，不需要多帧一致性确认
-                # 高噪声场景下 startup confirmation（5帧连续一致）几乎无法满足，
-                # 因为每帧 120+ 候选的最佳得分位置在帧间跳动 > 12px。
-                # 改为：第一帧就接受，后续由运动门控自然筛选。
+                # ★ 3. 启动确认：首次建立轨迹时用 tracklet 验证（连续 N 帧向下运动）
+                # 不再按单帧最高 diff_score 直接锁定，避免首帧锁定到刻度线/反光等伪目标。
+                # startup_confirmed=False 时累积候选缓冲区，验证通过或超时后置 True。
                 if not reject_reasons and last_valid_x is None and last_valid_y is None:
-                    # 检查点是否在大致中心区域（排除边缘噪声）
-                    frame_center_x = reader.width / 2.0
-                    center_margin = reader.width * 0.40  # 中心 ±40% 宽度
-                    if not (frame_center_x - center_margin <= x_px <= frame_center_x + center_margin):
-                        reject_reasons.append(
-                            f"startup_outside_center(x={x_px:.0f},center={frame_center_x:.0f})"
-                        )
-                    # 首帧须有明显运动信号，避免锁定静止噪声
-                    if selected_diff_score < 5.0:
-                        reject_reasons.append(
-                            f"startup_low_diff({selected_diff_score:.1f})"
-                        )
+                    if not startup_confirmed:
+                        frame_center_x = reader.width / 2.0
+                        center_margin = reader.width * 0.40
+                        if not (frame_center_x - center_margin <= x_px <= frame_center_x + center_margin):
+                            reject_reasons.append(
+                                f"startup_outside_center(x={x_px:.0f},center={frame_center_x:.0f})"
+                            )
+                            startup_buffer.clear()
+                        else:
+                            startup_buffer.append({
+                                "x": x_px, "y": y_px, "diff": selected_diff_score,
+                                "frame": frame_idx,
+                            })
+                            startup_confirm_frames = int(config.get("startup_confirm_frames", 5))
+                            buf_max = startup_confirm_frames + 5
+                            if len(startup_buffer) > buf_max:
+                                startup_buffer.pop(0)
+                            startup_fb = int(config.get("startup_fallback_frames", 25))
+                            if _startup_tracklet_confirmed(startup_buffer):
+                                startup_confirmed = True
+                            elif len(startup_buffer) >= startup_fb:
+                                logger.info(
+                                    "启动确认超时 (%d 帧未确认)，回退接受候选",
+                                    len(startup_buffer),
+                                )
+                                startup_confirmed = True
+                            else:
+                                reject_reasons.append("startup_not_confirmed")
+                    # 已确认或已超时回退 → 正常接受此点
 
                 if frame_state in (STATE_REACQUIRE, STATE_STOPPED):
                     # reacquire 时使用更宽的跳变门控（已在上面设置），但不完全跳过。
@@ -714,14 +869,40 @@ def process_video(video_path: str, config: dict) -> dict:
                                     )]
                         reject_reasons = filtered
 
-                # ★ 5. 已建立轨迹后，拒绝静止噪声（diff_score 过低说明候选无实际运动）
-                # 在 LOST/REACQUIRE 状态下也需要此检查，避免在交替接受/拒绝中循环
+                # ★ 5. diff_score 低不能单独硬拒绝（终端速度阶段 diff 天然低）
+                # 只有同时满足 (a) 极低 diff 或 (b) 长时间接近静止 才判定为静态噪声
                 if not reject_reasons and last_valid_x is not None:
                     min_track_diff = float(config.get("min_track_diff_score", 3.0))
-                    if selected_diff_score < min_track_diff:
-                        reject_reasons.append(
-                            f"static_noise(diff={selected_diff_score:.1f}<{min_track_diff:.1f})"
-                        )
+                    # 取最近 valid 点的累计位移
+                    recent_valid = [
+                        r for r in records[-10:]
+                        if r.get("valid") and r.get("y_px") is not None
+                    ]
+                    recent_n = len(recent_valid)
+                    if recent_n >= 3:
+                        recent_ys = [r["y_px"] for r in recent_valid]
+                        recent_xs = [r["x_px"] for r in recent_valid]
+                        y_disp = max(recent_ys) - min(recent_ys)
+                        x_disp = max(recent_xs) - min(recent_xs)
+                        # 条件 1: 极低 diff + 几乎静止
+                        if selected_diff_score < 1.0 and y_disp < 1.5:
+                            reject_reasons.append(
+                                f"static_noise(diff={selected_diff_score:.1f},y_disp={y_disp:.1f})"
+                            )
+                        # 条件 2: 超过 5 帧累计位移 < 2px → 可能锁定静态噪点
+                        elif recent_n >= 5 and y_disp < 2.0 and x_disp < 2.0 and selected_diff_score < 2.5:
+                            reject_reasons.append(
+                                f"static_lock(y_disp={y_disp:.1f},x_disp={x_disp:.1f},diff={selected_diff_score:.1f})"
+                            )
+                    if selected_diff_score < 1.0 and not reject_reasons:
+                        # diff 低但小球仍在运动 → 仅记录 warning，不拒绝
+                        record["_low_diff_warning"] = True
+
+                # ★ 模板匹配高分 → 信任检测，清空拒绝原因
+                if tm_score >= tm_trust and reject_reasons:
+                    reject_reasons.clear()
+                    if frame_idx < 100:
+                        logger.info("帧 %d: 模板信任跳过拒绝 (tm=%.3f)", frame_idx, tm_score)
 
                 if reject_reasons:
                     is_anomaly = True
@@ -756,11 +937,15 @@ def process_video(video_path: str, config: dict) -> dict:
                 # 反馈追踪状态（仅 raw 点更新 detector 内部状态）
                 if not is_fallback:
                     detector.set_prev(x_px - crop_offset_x, y_px - crop_offset_y)
+                    # ★ 模板进化：每次原始检测确认后更新模板（首次自动设置）
+                    if bool(config.get("template_enabled", True)):
+                        detector.evolve_template(frame, x_px, y_px)
                 # ★ predicted 点不更新 detector 状态，避免预测位置污染真实追踪
                 last_valid_x = x_px
                 last_valid_y = y_px
                 last_valid_frame = frame_idx
                 lost_counter = 0
+                consecutive_predicted = 0  # ★ raw 点接入后重置连续预测计数
                 total_found += 1
                 startup_candidate = None
                 startup_candidate_count = 0
@@ -809,6 +994,13 @@ def process_video(video_path: str, config: dict) -> dict:
 
         record["rejection"] = rejection
         records.append(record)
+
+        # ★ 等待阶段不受 lost_counter / STATE_LOST 影响
+        if _init_waiting:
+            lost_counter = 0
+            frame_state = STATE_TRACKING
+            detector.set_prev(init_x_roi, init_y_roi)
+            detector.clear_search_center()  # 全 ROI 搜索，不限制窗口
 
         # ---- 收集逐帧候选点信息（用于 candidate_debug.csv） ----
         candidates_list = result.get("candidates", [])
@@ -905,6 +1097,18 @@ def process_video(video_path: str, config: dict) -> dict:
                 config.get("expected_radius_px_min", 0) <= record.get("radius_px", 0) <= config.get("expected_radius_px_max", 999)
             ) if record.get("radius_px") is not None else 0,
         })
+
+        # ★ 实时回调：每帧处理完毕后通知调用者
+        if frame_callback is not None:
+            frame_callback(
+                frame_idx=frame_idx,
+                x_px=record.get("x_px"),
+                y_px=record.get("y_px"),
+                time_s=record["time_s"],
+                radius_px=record.get("radius_px"),
+                is_valid=bool(record["valid"] and record.get("x_px") is not None),
+                is_fallback=(record.get("point_type") == "predicted"),
+            )
 
         frame_idx += 1
 
@@ -1122,6 +1326,9 @@ def process_video(video_path: str, config: dict) -> dict:
         if frame_debug_records:
             enhanced_csv_path = os.path.join(output_dir, "frame_debug_detailed.csv")
             _save_frame_debug_detailed_csv(frame_debug_records, enhanced_csv_path)
+        # ★ tracker_debug.csv — 每帧追踪决策明细
+        tracker_csv_path = os.path.join(output_dir, "tracker_debug.csv")
+        _save_tracker_debug_csv(frame_debug_records, tracker_csv_path)
 
     return {
         "traj_df": df,
@@ -1393,7 +1600,16 @@ def _select_motion_consistent_detection(
             "diff_score": c.get("diff_score", 0.0),
             "mean_diff": c.get("mean_diff", 0.0),
             "source_method": c.get("source_method", ""),
+            "template_match_score": c.get("template_match_score", -1.0),
         }
+        # ★ 模板匹配高分 → 信任检测结果，跳过运动门控
+        tm_trust = float(config.get("template_trust_threshold", 0.65))
+        if cand["template_match_score"] >= tm_trust:
+            cand["_tm_trusted"] = True
+            candidates.append(cand)
+            if frame_idx < 100:
+                logger.info("帧 %d: 运动门控被模板信任跳过 (tm=%.3f)", frame_idx, cand["template_match_score"])
+            continue
         ok, reason, pred_error = _motion_gate(cand, history, config)
         cand["_motion_reject_reason"] = reason
         cand["_pred_error"] = pred_error
@@ -1422,9 +1638,12 @@ def _select_motion_consistent_detection(
             "mean_diff": 0.0,
         }
 
-    # 无历史时优先选 diff_score 最高的候选（运动=真小球，静止=噪声）
+    # ★ 无历史时：综合 score + diff_score 排序，不单靠 diff_score（刻度线/反光也有高 diff）
     if not history:
-        candidates.sort(key=lambda c: (-float(c.get("diff_score", 0.0)), -float(c.get("score", 0.0))))
+        candidates.sort(key=lambda c: (
+            -float(c.get("score", 0.0)),
+            -float(c.get("diff_score", 0.0)),
+        ))
     else:
         candidates.sort(key=lambda c: (c["_pred_error"], -float(c.get("diff_score", 0.0)), -float(c.get("score", 0.0))))
     return candidates[0]
@@ -1758,6 +1977,55 @@ def _save_frame_debug_detailed_csv(debug_records: list, output_path: str):
         logger.warning("保存增强 frame debug CSV 失败: %s", e)
 
 
+def _save_tracker_debug_csv(debug_records: list, output_path: str):
+    """保存 tracker_debug.csv — 每帧追踪决策明细。
+
+    字段:
+      frame                    帧号
+      single_frame_found       BallDetector 是否找到候选 (0/1)
+      tracking_selected        追踪层是否接受此帧 (0/1)
+      point_type               点类型: raw / predicted / interpolated / (空)
+      reject_reason            拒绝原因
+      dx                       与上一有效点 x 位移 (px)
+      dy                       与上一有效点 y 位移 (px)
+      dist                     与上一有效点距离 (px)
+      diff_score               被选中候选的 diff_score
+      state                    追踪状态: TRACKING / LOST / REACQUIRE / STOPPED
+    """
+    try:
+        if not debug_records:
+            logger.warning("无 tracker debug 记录，跳过 tracker_debug.csv")
+            return
+        rows = []
+        for d in debug_records:
+            # point_type
+            pt = ""
+            if d.get("is_valid_real"):
+                pt = "raw"
+            elif d.get("is_predicted"):
+                pt = "predicted"
+            elif d.get("is_interpolated"):
+                pt = "interpolated"
+
+            rows.append({
+                "frame": d.get("frame", 0),
+                "single_frame_found": d.get("is_selected", 0),
+                "tracking_selected": 1 if pt in ("raw", "predicted") else 0,
+                "point_type": pt,
+                "reject_reason": d.get("reject_reason", ""),
+                "dx": d.get("dx_from_prev"),
+                "dy": d.get("dy_from_prev"),
+                "dist": d.get("jump_px"),
+                "diff_score": d.get("selected_diff_score"),
+                "state": d.get("tracking_state", ""),
+            })
+        df = pd.DataFrame(rows)
+        df.to_csv(output_path, index=False, float_format="%.3f", encoding="utf-8")
+        logger.info("tracker_debug.csv 已保存: %s (%d 行)", output_path, len(df))
+    except Exception as e:
+        logger.warning("保存 tracker_debug.csv 失败: %s", e)
+
+
 def detect_track_interval(
     traj_df: pd.DataFrame,
     config: dict,
@@ -1786,6 +2054,34 @@ def detect_track_interval(
     # ---- 手动区间优先 ----
     manual_start = int(config.get("manual_start_frame", 0))
     manual_end = int(config.get("manual_end_frame", 0))
+
+    # ★ 初始位置锚点：用户点击了初始位置 → 自动找到该位置附近的首帧有效检测作为起始帧
+    _init_x = config.get("init_ball_x")
+    _init_y = config.get("init_ball_y")
+    if (_init_x is not None and _init_y is not None
+            and manual_start <= 0 and manual_end <= 0):
+        _dist_thresh = float(config.get("init_ball_distance_px", 120.0))
+        _raw_mask_local = (traj_df["point_type"] == "raw").values
+        _raw_idx_arr = np.where(_raw_mask_local)[0]
+        _x_vals = pd.to_numeric(traj_df["x_px"], errors="coerce").values
+        _y_vals = pd.to_numeric(traj_df["y_px"], errors="coerce").values
+        for _idx in _raw_idx_arr:
+            if (np.isfinite(_x_vals[_idx]) and np.isfinite(_y_vals[_idx])
+                    and abs(_x_vals[_idx] - _init_x) < _dist_thresh
+                    and abs(_y_vals[_idx] - _init_y) < _dist_thresh):
+                manual_start = int(_idx)
+                if debug_callback:
+                    debug_callback(
+                        f"[INFO] 初位置锚点: 帧 {manual_start} 在 "
+                        f"({_init_x:.0f}, {_init_y:.0f}) 附近检测到小球 → 设为起始帧"
+                    )
+                break
+        else:
+            if debug_callback:
+                debug_callback(
+                    f"[WARN] 初位置锚点: 在 ({_init_x:.0f}, {_init_y:.0f}) 附近 "
+                    f"{_dist_thresh:.0f}px 内未找到有效检测点，将使用自动区间"
+                )
 
     if manual_start > 0 or manual_end > 0:
         _roi = roi if roi is not None else config.get("roi")

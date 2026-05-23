@@ -52,6 +52,13 @@ class MainWindow(QMainWindow):
         self._output_dir = "data/results"
         self._init_ball_pos = None   # 用户手动点击的初始位置 (x, y)
 
+        # 实时绘图（分析过程中增量更新）
+        self._live_traj_points = []   # [(t_s, y_mm), ...]
+        self._live_scale_mm_px = 1.0
+        self._live_update_timer = QTimer(self)
+        self._live_update_timer.setInterval(200)  # 200ms
+        self._live_update_timer.timeout.connect(self._update_live_plot)
+
         # 中央 widget
         central = QWidget()
         self.setCentralWidget(central)
@@ -632,8 +639,14 @@ class MainWindow(QMainWindow):
         # 创建工作线程（传递归一化后的 config）
         self._worker = AnalysisWorker(cfg, self._video_path, self._output_dir, self)
         self._worker.progress.connect(self._on_worker_progress)
+        self._worker.frame_data.connect(self._on_frame_data)
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.error.connect(self._on_worker_error)
+        # 实时绘图初始化
+        self._live_traj_points.clear()
+        self._live_scale_mm_px = float(cfg.get("scale_mm_per_px", 1.0))
+        self._result_tabs.clear_trajectory_plot()
+        self._live_update_timer.start()
         self._worker.start()
 
     def _on_stop_analysis(self):
@@ -643,15 +656,31 @@ class MainWindow(QMainWindow):
             self._worker.quit()
             self._worker.wait(3000)
             self._param_panel.set_analyzing(False)
+            self._live_update_timer.stop()
             self._result_tabs.append_log("[INFO] 分析已停止。")
 
     def _on_worker_progress(self, msg: str):
         """工作线程进度更新。"""
         self._result_tabs.append_log(msg)
 
+    def _on_frame_data(self, frame_idx, x_px, y_px, time_s, radius_px, is_valid, is_fallback):
+        """实时接收逐帧检测结果（工作线程跨线程信号）。"""
+        if is_valid and y_px is not None:
+            y_mm = y_px * self._live_scale_mm_px
+            self._live_traj_points.append((time_s, y_mm))
+
+    def _update_live_plot(self):
+        """定时刷新 y-t 实时曲线。"""
+        if not self._live_traj_points:
+            return
+        self._result_tabs.update_trajectory_plot_incremental(self._live_traj_points)
+
     def _on_worker_finished(self, result: dict):
         """工作线程完成。"""
         self._param_panel.set_analyzing(False)
+        self._live_update_timer.stop()
+        # 最终刷新实时图（确保最后一帧数据也显示）
+        self._update_live_plot()
 
         self._traj_df = result.get("traj_df")
         self._traj_df_full = result.get("traj_df_full")

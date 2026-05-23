@@ -49,6 +49,7 @@ enable_wall_correction: true
 manual_start_frame: 0
 manual_end_frame: 0
 start_confirm_frames: 5
+init_ball_distance_px: 120
 lost_threshold: 10
 stop_y_ratio: 0.92
 terminal_ignore_end_sec: 0.5
@@ -60,3 +61,11 @@ threshold_mode: dark_ball_on_bright_bg
 threshold_value: null
 trajectory_prediction_gate_px: 35
 enable_prediction_fill: false
+
+# —— 模板匹配 ——
+template_enabled: true
+template_trust_threshold: 0.65
+template_match_threshold: 0.50
+template_evolve_alpha: 0.20
+template_tether_alpha: 0.05
+template_size_factor: 2.5

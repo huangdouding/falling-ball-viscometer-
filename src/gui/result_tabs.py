@@ -374,6 +374,48 @@ class ResultTabs(QTabWidget):
 
         return hints
 
+    # ---- 实时增量绘图 ----
+    def clear_trajectory_plot(self):
+        """清空轨迹图，准备实时更新。"""
+        ax = self._traj_canvas.axes
+        ax.clear()
+        ax.set_xlabel("Time t / s")
+        ax.set_ylabel("Position y / m")
+        ax.set_title("Trajectory y-t (live)")
+        ax.grid(True, alpha=0.3)
+        ax.invert_yaxis()
+        # 初始占位文本
+        ax.text(0.5, 0.5, "等待数据...", ha="center", va="center",
+                transform=ax.transAxes, fontsize=13)
+        self._traj_canvas.draw()
+
+    def update_trajectory_plot_incremental(self, points: list):
+        """增量更新 y-t 轨迹图（实时追加模式）。"""
+        if not points:
+            return
+        t = [p[0] for p in points]
+        y = [p[1] for p in points]
+        ax = self._traj_canvas.axes
+
+        # 首次调用：清除占位文本，初始化线条
+        texts = [c for c in ax.get_children() if isinstance(c, plt.Text) and c.get_text() == "等待数据..."]
+        if texts:
+            ax.clear()
+            ax.set_xlabel("Time t / s")
+            ax.set_ylabel("Position y / m")
+            ax.set_title("Trajectory y-t (live)")
+            ax.grid(True, alpha=0.3)
+            ax.invert_yaxis()
+            ax.plot(t, y, "b.-", markersize=3, label="trajectory (live)")
+            ax.legend(fontsize=9, loc="lower right")
+        else:
+            # 后续调用：更新已有线条
+            if ax.lines:
+                ax.lines[0].set_data(t, y)
+                ax.relim()
+                ax.autoscale_view()
+        self._traj_canvas.draw_idle()
+
     # ---- 清空 ----
     def clear_all(self):
         for canvas in [self._traj_canvas, self._vel_canvas, self._fit_canvas]:
