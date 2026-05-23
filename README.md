@@ -138,8 +138,12 @@ python main.py --config config.yaml
 
 辅助机制：
 
+- **初始位置等待** — 用户在视频上点击小球初始位置后，系统不会立即开始追踪。等待阶段持续累积候选点，仅当连续多帧检测到**持续向下运动**（非静止）时才确认小球到达并开始追踪。有效防止静止特征（刻度线、反光）被误认为小球
+- **ROI 边界过滤** — 所有检测候选强制经过 `user_roi` 边界校验，ROI 外的候选直接丢弃
+- **模板匹配（NCC 相关）** — 首次检测到小球后自动提取 ROI 内图像模板，后续帧对候选窗口计算归一化互相关分数。模板匹配高分（≥ 0.65）时自动信任检测结果并跳过运动门控，解决加速阶段门控过严问题。模板持续进化（α=0.20）并回拽原始帧（α=0.05）
 - **动态参数计算** — 根据 `ball_radius_mm` 和 `scale_mm_per_px` 自动推算 `min_area_px`、`max_area_px`、搜索窗口尺寸、`dist_max` 等参数，无需手动调参
-- **预测填充** — 检测短暂丢失时，基于历史速度预测位置填补空白（`enable_prediction_fill`，最多连续 18 帧）
+- **预测填充** — 检测短暂丢失时，基于加速度预测位置填补空白（`pos + v·dt + 0.5·a·dt²`）。`enable_prediction_fill` 控制开关，最多连续 18 帧
+- **动态搜索窗口** — 模板高置信度时缩小搜索窗口，丢帧后逐步扩大（1.5× → 2.5× → 4× → 6×）
 - **断尾修剪** — 检测到轨迹突然跳变至异常位置后，自动截断尾部伪影（连续 2 帧异常即触发）
 - **大球模式** — 球半径 ≥ 1.0 mm 或像素半径 ≥ 5 px 时自动启用，放宽面积和搜索窗口
 
@@ -268,11 +272,24 @@ $$ \eta = \eta_{\infty} \left[ 1 - 2.104 \cdot \frac{r}{R} + 2.09 \cdot \left(\f
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `start_confirm_frames` | 启动确认帧数 | `5` |
+| `init_ball_distance_px` | 初始位置检测范围 (px) | 自动计算（5×ball_radius_px，最小15） |
+| `init_ball_confirm_frames` | 初始位置确认所需连续向下运动帧数 | `5` |
 | `startup_gate_scale` | 启动阶段 x 门控放宽倍数 | `2.0` |
 | `tracking_tolerance_scale` | 稳定追踪连续性门控放宽系数 | auto |
 | `tracking_rescue_scale` | Rescue 门控放宽系数 | `1.8` |
 | `tracking_rescue_pred_scale` | Rescue 预测误差放宽系数 | `1.6` |
 | `tracking_prediction_gate_scale` | 预测误差门控缩放 | `1.10` |
+
+### 模板匹配参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `template_enabled` | 启用 NCC 模板匹配 | `true` |
+| `template_match_threshold` | 模板匹配最低相关系数 (0~1) | `0.50` |
+| `template_trust_threshold` | 信任跳过运动门控的模板分阈值 | `0.65` |
+| `template_evolve_alpha` | 模板进化率 (0~1) | `0.20` |
+| `template_tether_alpha` | 模板回拽率 (0~1)，拉回原始帧 | `0.05` |
+| `template_size_factor` | 模板尺寸 = 球半径 × 系数 | `2.5` |
 
 ### 新版追踪参数（ball_tracker.py）
 
@@ -333,13 +350,21 @@ GUI 基于 PySide6，主要功能区：
 
 | 面板 | 功能 |
 |------|------|
-| 参数面板 | 编辑所有实验参数（物理量 / 检测 / 追踪 / 终端判定） |
-| 视频预览 | 实时预览视频、ROI 框选 |
+| 参数面板 | 编辑所有实验参数（物理量 / 检测 / 追踪 / 终端判定 / 模板匹配） |
+| 视频预览 | 实时预览视频、ROI 框选、**点击设定小球初始位置** |
 | 结果面板 | 多 Tab 展示轨迹图、速度曲线、黏度结果、调试信息 |
+| **实时轨迹** | 分析过程中 y-t 图增量更新，每秒刷新 5 次，即时观察追踪质量 |
 | 手动区间 | 支持手动指定分析起止帧，覆盖自动区间选择 |
 | 管线切换 | `use_new_pipeline` 一键切换旧版/新版管线 |
 | 质量评估 | 展示 min_frames / R² / Cv 质量指标，与阈值对比 |
 | 参考黏度 | 输入参考黏度值进行实验误差分析 |
+
+### 初始位置设定
+
+在视频预览区**右键点击**小球初始位置，系统会记录该坐标。分析时：
+1. 等待阶段：仅当连续多帧在初始位置附近检测到**持续向下运动**时才确认小球到达
+2. 确认后开始追踪，之前的静止误检全部忽略
+3. 初始位置的范围由 `init_ball_distance_px` 控制（默认 5 倍球半径）
 
 ## 输出
 
@@ -375,11 +400,14 @@ GUI 基于 PySide6，主要功能区：
 |------|------|
 | 检测不到小球 | 设置 `roi` 缩小搜索区；调整 `expected_radius_px_max` 覆盖实际大小 |
 | 识别不稳定 | 减小 `max_jump_px`；增大 `gaussian_blur_ksize` |
-| 静止噪点被误追踪 | 增大 `min_track_diff_score`（默认 3.0）；开启 `enable_long_line_rejection` |
+| **从视频开始就追踪到静止噪点** | **在视频上右键点击小球初始位置**；系统会等待小球真正到达才追踪 |
+| 静止噪点被误追踪 | 增大 `min_track_diff_score`（默认 3.0）；确保已设置初始位置；开启 `enable_long_line_rejection` |
+| 初始位置范围过大/过小 | 调整 `init_ball_distance_px`（默认 5×球半径，约 26 px） |
 | 找不到终端区 | 放宽 `cv_threshold` 到 0.12；检查小球是否已进入匀速段 |
 | 轨迹跟随伪影 | 切换到 `strict_physics` 预设；减小 `allowed_axis_deviation_px` |
 | 刻度线被误检为小球 | 确保 `enable_long_line_rejection: true`；缩小 `roi` 避开密集刻度区 |
 | 丢失帧太多导致断连 | 开启 `enable_prediction_fill: true`；增大 `predict_max_frames` |
+| 加速阶段运动门控过严 | 确保 `template_enabled: true`；模板匹配高分自动跳过门控 |
 | 小球像素太小（< 5 px） | 提高拍摄分辨率或拉近相机；确保小球像素直径 ≥ 12 px |
 
 ## 依赖
