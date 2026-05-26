@@ -175,6 +175,18 @@ $$ \eta_{\text{basic}} = \frac{2 \cdot r^2 \cdot g \cdot (\rho_s - \rho_l)}{9 \c
 
 其中 r 为小球半径，ρ_s 为小球密度，ρ_l 为液体密度，v_t 为终端速度。
 
+### 壁面修正（Ladenburg-Faxen 公式）
+
+补偿有限容器壁面对小球阻力的影响。Stokes 定律假设无限大流体，当小球在有限半径量筒中下落时，壁面会增大阻力，使表观黏度偏高。
+
+壁面修正因子由量筒径向和轴向边界共同决定：
+
+$$ k_{\text{wall}} = \left(1 + 2.4 \frac{r}{R}\right) \left(1 + 3.3 \frac{r}{h}\right) $$
+
+其中 $r$ 为小球半径，$R$ 为量筒内半径，$h$ 为液柱高度。
+
+由 `enable_wall_correction` 控制开关。
+
 ### 雷诺数修正（Oseen 公式）
 
 补偿有限雷诺数下 Stokes 阻力公式的系统偏差。Stokes 阻力 $F_d = 6\pi\eta r v$ 仅严格适用于 Re → 0。
@@ -186,15 +198,28 @@ $$ F_d = 6\pi\eta r v \left(1 + \frac{3}{16}Re \right) $$
 
 $$ \eta_{\text{re}} = \frac{\eta_{\text{basic}}}{1 + \frac{3}{16}Re}, \quad Re = \frac{2 r v_t \rho_l}{\eta_{\text{re}}} $$
 
+由 `enable_reynolds_correction` 控制开关。Re > 1 时输出警告。
+
+### 综合修正
+
+当同时启用壁面修正和雷诺数修正时，最终黏度为：
+
+$$ \eta_{\text{final}} = \frac{\eta_{\text{basic}}}{k_{\text{wall}} \cdot k_{\text{Re}}} $$
+
+### 修正符号表
+
 | 符号 | 含义 |
 |------|------|
 | r | 小球半径 |
+| R | 量筒内半径 |
+| h | 液柱高度 |
 | ρ_l | 液体密度 |
 | v_t | 终端速度 |
 | η_basic | Stokes 理想黏度 |
 | η_re | Oseen 修正后黏度 |
-
-由 `enable_reynolds_correction` 控制开关。Re > 1 时输出警告。
+| η_final | 综合修正后黏度 |
+| k_wall | 壁面修正因子 |
+| k_Re | 雷诺数修正因子 |
 
 ## 配置参数
 
@@ -354,6 +379,7 @@ $$ \eta_{\text{re}} = \frac{\eta_{\text{basic}}}{1 + \frac{3}{16}Re}, \quad Re =
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `use_new_pipeline` | 启用新版管线 | `false` |
+| `enable_wall_correction` | 壁面修正（Ladenburg-Faxen） | `true` |
 | `enable_reynolds_correction` | Oseen 雷诺数修正 | `true` |
 | `enable_long_line_rejection` | 长直线结构抑制 | `true` |
 | `save_marked_video` | 输出标注视频 | `true` |
