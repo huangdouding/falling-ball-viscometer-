@@ -348,7 +348,19 @@ class MainWindow(QMainWindow):
         # 传递媒体类型给检测器（图片模式禁止 bg_sub）
         cfg["image_mode"] = (self._media_type == "image")
 
-        cfg["image_mode"] = (self._media_type == "image")
+        # 构建背景模型（仅视频模式 + auto/bg_sub 检测方法）
+        background = None
+        detect_method = cfg.get("detect_method", "auto")
+        if not cfg["image_mode"] and detect_method in ("auto", "background_subtraction"):
+            try:
+                from src.video_io import VideoReader
+                reader = VideoReader(self._video_path)
+                from src.tracking import _build_background
+                bg_roi = cfg.get("detect_roi") or cfg.get("roi")
+                background = _build_background(reader, n_frames=50, roi=bg_roi)
+                reader.reset()
+            except Exception as e:
+                self._result_tabs.append_log(f"[WARN] 背景模型构建失败: {e}")
 
         # Keep the single-frame debug path aligned with full analysis. Without
         # this, 2.0/2.5 mm balls can still be judged by a stale 1-4 px radius
@@ -360,8 +372,9 @@ class MainWindow(QMainWindow):
         _compute_dynamic_detection_params(cfg)
         _compute_dynamic_tracking_params(cfg)
 
-        detector = BallDetector(cfg)
+        detector = BallDetector(cfg, background=background)
         detector.reset()
+
         result = detector.detect(frame, frame_idx)
 
         # 存储检测结果 + 调试图片
@@ -572,6 +585,7 @@ class MainWindow(QMainWindow):
             ("temperature_c", "°C"),
             ("reference_viscosity_pa_s", "Pa·s"),
             ("enable_wall_correction", ""),
+            ("enable_reynolds_correction", ""),
             ("gravity_m_s2", "m/s²"),
             ("manual_fps", "fps"),
         ]
@@ -605,6 +619,7 @@ class MainWindow(QMainWindow):
             ("temperature_c", "°C"),
             ("reference_viscosity_pa_s", "Pa·s"),
             ("enable_wall_correction", ""),
+            ("enable_reynolds_correction", ""),
             ("gravity_m_s2", "m/s²"),
             ("manual_fps", "fps"),
             ("color_mode", ""),
@@ -719,27 +734,37 @@ class MainWindow(QMainWindow):
         if self._traj_df is not None:
             self._result_tabs.update_fit_plot(self._traj_df, self._terminal_region)
 
-        # 壁面修正调试输出到日志
+        # 综合修正调试输出到日志
         if self._viscosity_result:
             vr = self._viscosity_result
+            wall_on = vr.get('enable_wall_correction', True)
+            re_on = vr.get('enable_reynolds_correction', True)
+            tag_parts = []
+            if wall_on: tag_parts.append("壁面")
+            if re_on: tag_parts.append("雷诺数")
+            corr_tag = "+".join(tag_parts) + "修正" if tag_parts else "无修正"
             log_lines = [
-                "[DEBUG] 壁面修正详细参数:",
+                f"[DEBUG] 修正详情 ({corr_tag}):",
                 f"  r = {vr.get('r_m', '?'):.6f} m",
+                f"  η_basic = {vr.get('eta_basic_pa_s', '?'):.6f} Pa·s",
                 f"  R = {vr.get('R_m', '?'):.6f} m",
                 f"  h = {vr.get('h_m', '?'):.6f} m",
                 f"  r/R = {vr.get('r_over_R', '?'):.6f}",
                 f"  r/h = {vr.get('r_over_h', '?'):.6f}",
-                f"  correction_factor = {vr.get('correction_factor', '?'):.6f}",
-                f"  η_basic = {vr.get('eta_basic_pa_s', '?'):.6f} Pa·s",
+                f"  wall_correction_factor = {vr.get('wall_correction_factor', '?'):.6f}",
                 f"  η_wall = {vr.get('eta_wall_pa_s', '?'):.6f} Pa·s",
+                f"  Re = {vr.get('reynolds_number', '?'):.6f}",
+                f"  reynolds_factor = 1 + 3/16·Re = {vr.get('reynolds_factor', '?'):.6f}",
+                f"  η_re = {vr.get('eta_reynolds_pa_s', '?'):.6f} Pa·s",
+                f"  η_final = {vr.get('eta_final_pa_s', '?'):.6f} Pa·s",
             ]
             ref_v = vr.get('reference_viscosity_pa_s')
             if ref_v and ref_v > 0:
                 basic_err = abs(vr['eta_basic_pa_s'] - ref_v) / ref_v * 100
-                wall_err = abs(vr['eta_wall_pa_s'] - ref_v) / ref_v * 100
+                final_err = abs(vr['eta_final_pa_s'] - ref_v) / ref_v * 100
                 log_lines.append(f"  reference_viscosity = {ref_v:.6f} Pa·s")
                 log_lines.append(f"  basic_error_percent = {basic_err:.2f}%")
-                log_lines.append(f"  wall_error_percent = {wall_err:.2f}%")
+                log_lines.append(f"  final_error_percent = {final_err:.2f}%")
             for line in log_lines:
                 self._result_tabs.append_log(line)
 

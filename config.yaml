@@ -46,6 +46,7 @@ smooth_window: 5
 temperature_c: 40.0
 reference_viscosity_pa_s: 0.231
 enable_wall_correction: true
+enable_reynolds_correction: true
 manual_start_frame: 0
 manual_end_frame: 0
 start_confirm_frames: 5

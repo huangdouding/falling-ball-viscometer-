@@ -175,19 +175,26 @@ $$ \eta_{\text{basic}} = \frac{2 \cdot r^2 \cdot g \cdot (\rho_s - \rho_l)}{9 \c
 
 其中 r 为小球半径，ρ_s 为小球密度，ρ_l 为液体密度，v_t 为终端速度。
 
-### 管壁与液高修正（Ladenburg 公式）
+### 雷诺数修正（Oseen 公式）
 
-考虑量筒壁面和液柱高度对小球沉降的阻滞效应：
+补偿有限雷诺数下 Stokes 阻力公式的系统偏差。Stokes 阻力 $F_d = 6\pi\eta r v$ 仅严格适用于 Re → 0。
+Oseen 修正给出更精确的阻力表达式：
 
-$$ \eta_{\text{wall}} = \frac{\eta_{\text{basic}}}{(1 + 2.4 \cdot \frac{r}{R}) \cdot (1 + 3.3 \cdot \frac{r}{h})} $$
+$$ F_d = 6\pi\eta r v \left(1 + \frac{3}{16}Re \right) $$
+
+其中雷诺数 $Re = \frac{2 r v \rho_l}{\eta}$。由终端速度平衡导出隐式方程并通过迭代求解：
+
+$$ \eta_{\text{re}} = \frac{\eta_{\text{basic}}}{1 + \frac{3}{16}Re}, \quad Re = \frac{2 r v_t \rho_l}{\eta_{\text{re}}} $$
 
 | 符号 | 含义 |
 |------|------|
 | r | 小球半径 |
-| R | 量筒内半径 |
-| h | 液柱高度 |
+| ρ_l | 液体密度 |
+| v_t | 终端速度 |
+| η_basic | Stokes 理想黏度 |
+| η_re | Oseen 修正后黏度 |
 
-由 `enable_wall_correction` 控制开关。修正因子 > 1.10 时输出警告。
+由 `enable_reynolds_correction` 控制开关。Re > 1 时输出警告。
 
 ## 配置参数
 
@@ -347,7 +354,7 @@ $$ \eta_{\text{wall}} = \frac{\eta_{\text{basic}}}{(1 + 2.4 \cdot \frac{r}{R}) \
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `use_new_pipeline` | 启用新版管线 | `false` |
-| `enable_wall_correction` | 管壁修正 | `true` |
+| `enable_reynolds_correction` | Oseen 雷诺数修正 | `true` |
 | `enable_long_line_rejection` | 长直线结构抑制 | `true` |
 | `save_marked_video` | 输出标注视频 | `true` |
 | `save_plots` | 输出图表 | `true` |

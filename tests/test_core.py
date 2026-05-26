@@ -176,6 +176,7 @@ class CorePipelineTests(unittest.TestCase):
             liquid_height_m=0.35,
             g_m_s2=9.8,
             enable_wall_correction=False,
+            enable_reynolds_correction=False,
         )
         expected = 2 * (0.001 ** 2) * 9.8 * (7800 - 1260) / (9 * 0.02)
         self.assertTrue(math.isclose(result["eta_final_pa_s"], expected, rel_tol=1e-12))

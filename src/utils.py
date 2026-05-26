@@ -56,6 +56,7 @@ STANDARD_PHYSICS_KEYS = {
     "temperature_c",
     "reference_viscosity_pa_s",
     "enable_wall_correction",
+    "enable_reynolds_correction",
     "gravity_m_s2",
     "manual_fps",
 }

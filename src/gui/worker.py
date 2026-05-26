@@ -494,6 +494,7 @@ class AnalysisWorker(QThread):
                         g_m_s2=config.get("gravity_m_s2", 9.8),
                         temperature_c=config.get("temperature_c"),
                         enable_wall_correction=config.get("enable_wall_correction", True),
+                        enable_reynolds_correction=config.get("enable_reynolds_correction", True),
                     )
                     # 追加参考黏度到结果字典
                     ref_visc = config.get("reference_viscosity_pa_s")
@@ -501,7 +502,12 @@ class AnalysisWorker(QThread):
                     viscosity_result["temperature_c"] = config.get("temperature_c", "?")
 
                     eta_final = viscosity_result["eta_final_pa_s"]
-                    wall_tag = "壁面修正后" if config.get("enable_wall_correction", True) else "基础"
+                    tags = []
+                    if config.get("enable_wall_correction", True):
+                        tags.append("壁面")
+                    if config.get("enable_reynolds_correction", True):
+                        tags.append("雷诺数")
+                    wall_tag = ("+".join(tags) + "修正") if tags else "基础"
                     self.progress.emit(
                         f"[INFO] 黏度结果: η_basic={viscosity_result['eta_basic_pa_s']:.6f} Pa·s, "
                         f"η_final({wall_tag})={eta_final:.6f} Pa·s, "

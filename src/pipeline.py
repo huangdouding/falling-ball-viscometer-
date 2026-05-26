@@ -379,6 +379,7 @@ def run_pipeline(
                 g_m_s2=config.get("gravity_m_s2", 9.8),
                 temperature_c=config.get("temperature_c"),
                 enable_wall_correction=config.get("enable_wall_correction", True),
+                enable_reynolds_correction=config.get("enable_reynolds_correction", True),
             )
             viscosity_result["reference_viscosity_pa_s"] = config.get("reference_viscosity_pa_s")
             viscosity_result["temperature_c"] = config.get("temperature_c", "?")

@@ -265,10 +265,17 @@ def main():
                 liquid_height_m=config["liquid_height_mm"] / 1000.0,
                 g_m_s2=config.get("gravity_m_s2", 9.8),
                 temperature_c=config.get("temperature_c"),
+                enable_wall_correction=config.get("enable_wall_correction", True),
+                enable_reynolds_correction=config.get("enable_reynolds_correction", True),
             )
             _safe_print(f"  理想黏度 η_basic: {viscosity_result['eta_basic_pa_s']:.6f} Pa·s")
-            _safe_print(f"  修正因子:         {viscosity_result['correction_factor']:.4f}")
-            _safe_print(f"  修正黏度 η_wall:  {viscosity_result['eta_wall_pa_s']:.6f} Pa·s")
+            wf = viscosity_result.get('wall_correction_factor', 1.0)
+            if wf > 1.0:
+                _safe_print(f"  壁面修正因子:     {wf:.4f}")
+            rf = viscosity_result['reynolds_factor']
+            if rf > 1.0:
+                _safe_print(f"  雷诺数修正因子:   {rf:.4f}")
+            _safe_print(f"  最终黏度 η_final: {viscosity_result['eta_final_pa_s']:.6f} Pa·s")
             _safe_print(f"  雷诺数 Re:        {viscosity_result['reynolds_number']:.4f}")
 
             if viscosity_result.get("warnings"):

@@ -84,7 +84,8 @@ def run_single(video_path: str, ball_size: float, temp: int, output_dir: str) ->
     if vr:
         summary["eta_basic_Pa_s"] = round(float(vr["eta_basic_pa_s"]), 6)
         summary["eta_final_Pa_s"] = round(float(vr["eta_final_pa_s"]), 6)
-        summary["correction_factor"] = round(float(vr["correction_factor"]), 4)
+        summary["wall_factor"] = round(float(vr.get("wall_correction_factor", 1.0)), 4)
+        summary["reynolds_factor"] = round(float(vr["reynolds_factor"]), 4)
         summary["Re"] = round(float(vr["reynolds_number"]), 4)
         summary["ref_Pa_s"] = REF_VISC[temp]
         if summary.get("eta_final_Pa_s") and summary["ref_Pa_s"]:
@@ -194,7 +195,7 @@ def main():
         "video", "ball_mm", "temp_C", "success", "elapsed_s",
         "terminal_found", "vt_m_s", "r2", "cv", "region",
         "frames_raw", "frames_total", "y_disp_m",
-        "eta_basic_Pa_s", "eta_final_Pa_s", "correction_factor", "Re",
+        "eta_basic_Pa_s", "eta_final_Pa_s", "wall_factor", "reynolds_factor", "Re",
         "ref_Pa_s", "error_pct", "interval_frames", "interval_s", "error",
     ]
     with open(csv_path, "w", newline="", encoding="utf-8") as f:

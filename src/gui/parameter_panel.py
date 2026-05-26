@@ -51,6 +51,7 @@ DEFAULT_CONFIG = {
     "temperature_c": 40.0,
     "reference_viscosity_pa_s": 0.231,
     "enable_wall_correction": True,
+    "enable_reynolds_correction": True,
     "gravity_m_s2": 9.80,
     "manual_fps": 240.0,
     # — 小球识别参数 —
@@ -187,7 +188,6 @@ class ParameterPanel(QScrollArea):
         super().__init__(parent)
         self._loading_config = False
         self._runtime_config = {}
-        self._dirty_keys = set()
         self.setWidgetResizable(True)
         self.setMinimumWidth(300)
         self.setMaximumWidth(380)
@@ -240,8 +240,10 @@ class ParameterPanel(QScrollArea):
         self._temp = ParamRow("温度", "°C", -10, 100, 1, 40)
         self._ref_visc = ParamRow("参考黏度", "Pa·s", 0, 100, 6, 0.231)
         self._ref_visc.setToolTip("用于相对误差计算（40°C蓖麻油 ≈ 0.231 Pa·s）")
-        self._wall_corr = QCheckBox("启用壁面修正")
+        self._wall_corr = QCheckBox("启用壁面修正 (Ladenburg)")
         self._wall_corr.setChecked(True)
+        self._reynolds_corr = QCheckBox("启用雷诺数修正 (Oseen)")
+        self._reynolds_corr.setChecked(True)
         self._g = ParamRow("重力加速度", "m/s²", 1, 20, 2, 9.80)
         self._fps = ParamRow("视频帧率", "fps", 1, 10000, 0, 240)
         self._fps.setToolTip("iPhone 慢动作视频可能被 OpenCV 读为 30fps，请设为实际拍摄帧率 240")
@@ -258,6 +260,7 @@ class ParameterPanel(QScrollArea):
         add_row(fa, self._temp)
         add_row(fa, self._ref_visc)
         fa.addRow("", self._wall_corr)
+        fa.addRow("", self._reynolds_corr)
         add_row(fa, self._g)
         add_row(fa, self._fps)
         layout.addWidget(grp_a)
@@ -510,10 +513,9 @@ class ParameterPanel(QScrollArea):
 
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setSingleShot(True)
-        self._autosave_timer.setInterval(800)
+        self._autosave_timer.setInterval(2000)
         self._autosave_timer.timeout.connect(self._autosave_now)
         self._connect_autosave_signals()
-        self._connect_dirty_tracking()
 
     def _connect_autosave_signals(self):
         """Save edited parameters shortly after the user changes them."""
@@ -526,27 +528,6 @@ class ParameterPanel(QScrollArea):
         for checkbox in self.findChildren(QCheckBox):
             checkbox.toggled.connect(self._schedule_autosave)
 
-    def _connect_dirty_tracking(self):
-        """Track fields the user actually edited in this session."""
-        bindings = [
-            (self._scale.spin, "scale_mm_per_px"),
-            (self._radius.spin, "ball_radius_mm"),
-            (self._ball_dens.spin, "ball_density_kg_m3"),
-            (self._liq_dens.spin, "liquid_density_kg_m3"),
-            (self._cyl_radius.spin, "cylinder_radius_mm"),
-            (self._liq_height.spin, "liquid_height_mm"),
-            (self._temp.spin, "temperature_c"),
-            (self._ref_visc.spin, "reference_viscosity_pa_s"),
-            (self._g.spin, "gravity_m_s2"),
-            (self._fps.spin, "manual_fps"),
-        ]
-        for widget, key in bindings:
-            widget.valueChanged.connect(lambda _v, k=key: self._mark_dirty(k))
-        self._wall_corr.toggled.connect(lambda _v: self._mark_dirty("enable_wall_correction"))
-
-    def _mark_dirty(self, key: str):
-        if not self._loading_config:
-            self._dirty_keys.add(key)
 
     def _schedule_autosave(self, *args):
         if not self._loading_config:
@@ -613,6 +594,7 @@ class ParameterPanel(QScrollArea):
             "temperature_c": self._temp.value(),
             "reference_viscosity_pa_s": self._ref_visc.value(),
             "enable_wall_correction": self._wall_corr.isChecked(),
+            "enable_reynolds_correction": self._reynolds_corr.isChecked(),
             "gravity_m_s2": self._g.value(),
             "manual_fps": self._fps.value(),
 
@@ -722,13 +704,13 @@ class ParameterPanel(QScrollArea):
                     return v
             return default
 
-        def _set_d(spin, *keys, default=0):
-            v = _get(cfg, *keys, default=default)
+        def _set_d(spin, *keys, **_):
+            v = _get(cfg, *keys, default=None)
             if v is not None:
                 spin.setValue(float(v))
 
-        def _set_i(spin, *keys, default=0):
-            v = _get(cfg, *keys, default=default)
+        def _set_i(spin, *keys, **_):
+            v = _get(cfg, *keys, default=None)
             if v is not None:
                 spin.setValue(int(v))
 
@@ -757,6 +739,7 @@ class ParameterPanel(QScrollArea):
         _set_d(self._temp, "temperature_c", default=40)
         _set_d(self._ref_visc, "reference_viscosity_pa_s", default=0.231)
         self._wall_corr.setChecked(cfg.get("enable_wall_correction", True))
+        self._reynolds_corr.setChecked(cfg.get("enable_reynolds_correction", True))
         _set_d(self._g, "g_m_s2", "gravity_m_s2", default=9.80)
         _set_d(self._fps, "manual_fps", "fps", default=240)
 
@@ -868,7 +851,6 @@ class ParameterPanel(QScrollArea):
 
         cfg = self.get_config()
         cfg = normalize_config_keys(cfg)
-        cfg = self._merge_with_existing_saved_physics(cfg)
         try:
             os.makedirs(os.path.dirname(_SETTINGS_PATH), exist_ok=True)
             with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
@@ -892,54 +874,10 @@ class ParameterPanel(QScrollArea):
             _safe_cfg_print(f"[CONFIG]   verified")
 
             self.config_saved.emit(_SETTINGS_PATH)
-            self._dirty_keys.clear()
         except Exception as e:
             QMessageBox.warning(self, "保存失败",
                                 f"无法保存参数到 {_SETTINGS_PATH}:\n{e}")
             raise
-
-    def _merge_with_existing_saved_physics(self, cfg: dict) -> dict:
-        """Protect saved physical parameters from accidental default-value rewrites."""
-        from src.utils import normalize_config_keys
-
-        protected = {
-            "scale_mm_per_px",
-            "ball_radius_mm",
-            "ball_density_kg_m3",
-            "liquid_density_kg_m3",
-            "cylinder_radius_mm",
-            "liquid_height_mm",
-            "temperature_c",
-            "reference_viscosity_pa_s",
-            "enable_wall_correction",
-            "gravity_m_s2",
-            "manual_fps",
-        }
-        if not os.path.exists(_SETTINGS_PATH):
-            return cfg
-        try:
-            with open(_SETTINGS_PATH, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-            existing = normalize_config_keys(existing)
-        except Exception:
-            return cfg
-
-        merged = dict(cfg)
-        preserved = []
-        for key in protected:
-            if key in existing and key not in self._dirty_keys:
-                old = existing.get(key)
-                new = merged.get(key)
-                if old is not None and new != old:
-                    merged[key] = old
-                    preserved.append(key)
-
-        if preserved:
-            _safe_cfg_print(
-                "[CONFIG] preserved saved physical parameters not edited in UI: "
-                + ", ".join(sorted(preserved))
-            )
-        return merged
 
     def _on_save_clicked(self):
         """「保存参数」按钮点击：保存并确认弹窗。"""
@@ -964,7 +902,6 @@ class ParameterPanel(QScrollArea):
                 cfg = json.load(f)
             cfg = normalize_config_keys(cfg)
             self.set_config(cfg)
-            self._dirty_keys.clear()
             n_keys = len(cfg)
             _safe_cfg_print(f"[CONFIG] loaded {n_keys} keys from {_SETTINGS_PATH}")
             _safe_cfg_print(f"[CONFIG]   scale_mm_per_px       = {cfg.get('scale_mm_per_px', '?')}")

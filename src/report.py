@@ -109,10 +109,15 @@ def generate_summary(
     lines.append("【黏度计算结果】")
     if viscosity_result is not None:
         lines.append(f"  理想黏度 η_basic:    {viscosity_result['eta_basic_pa_s']:.6f} Pa·s")
-        lines.append(f"  壁面修正因子:        {viscosity_result['correction_factor']:.4f}")
-        lines.append(f"    (1 + 2.4·r/R)(1 + 3.3·r/h)")
-        lines.append(f"  修正黏度 η_wall:     {viscosity_result['eta_wall_pa_s']:.6f} Pa·s")
-        lines.append(f"    (η_wall = η_basic / correction)")
+        wf = viscosity_result.get('wall_correction_factor', 1.0)
+        if wf > 1.0:
+            lines.append(f"  壁面修正因子:        {wf:.4f}")
+            lines.append(f"    (1 + 2.4·r/R)(1 + 3.3·r/h)")
+        rf = viscosity_result.get('reynolds_factor', 1.0)
+        if rf > 1.0:
+            lines.append(f"  雷诺数修正因子:        {rf:.4f}")
+            lines.append(f"    (因子 = 1 + 3/16·Re)")
+        lines.append(f"  最终黏度 η_final:   {viscosity_result['eta_final_pa_s']:.6f} Pa·s")
         lines.append(f"  雷诺数 Re:           {viscosity_result['reynolds_number']:.4f}")
 
         if viscosity_result.get("warnings"):

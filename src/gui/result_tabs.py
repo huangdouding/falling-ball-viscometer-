@@ -277,38 +277,59 @@ class ResultTabs(QTabWidget):
 
             if viscosity_result:
                 vb = viscosity_result['eta_basic_pa_s']
-                cf = viscosity_result['correction_factor']
-                vw = viscosity_result['eta_wall_pa_s']
+                wf = viscosity_result.get('wall_correction_factor', 1.0)
+                vw = viscosity_result.get('eta_wall_pa_s', vb)
+                rf = viscosity_result['reynolds_factor']
+                vre = viscosity_result['eta_reynolds_pa_s']
+                vfinal = viscosity_result['eta_final_pa_s']
                 re = viscosity_result['reynolds_number']
                 wall_on = viscosity_result.get('enable_wall_correction', True)
+                re_on = viscosity_result.get('enable_reynolds_correction', True)
 
                 rows.append(("─" * 20, "──── 黏度结果 ────"))
                 rows.append(("基础黏度 η_basic", f"{vb:.6f} Pa·s"))
-                rows.append(("壁面修正因子", f"{cf:.4f}"))
-                rows.append(("修正后黏度 η_wall", f"{vw:.6f} Pa·s"))
+
+                if wall_on:
+                    rows.append(("壁面修正因子 (1+2.4r/R)(1+3.3r/h)", f"{wf:.4f}"))
+                    rows.append(("壁面修正后 η_wall", f"{vw:.6f} Pa·s"))
+
+                if re_on:
+                    rows.append(("雷诺数修正因子 (= 1 + 3/16 Re)", f"{rf:.4f}"))
+
+                tags = []
+                if wall_on:
+                    tags.append("壁面")
+                if re_on:
+                    tags.append("雷诺数")
+                if len(tags) == 2:
+                    tag_str = "壁面+雷诺数综合修正"
+                elif len(tags) == 1:
+                    tag_str = tags[0] + "修正（单一）"
+                else:
+                    tag_str = "无修正"
                 rows.append(("最终黏度 η_final",
-                             f"{viscosity_result['eta_final_pa_s']:.6f} Pa·s"
-                             f"  ({'η_wall = η_basic / correction' if wall_on else 'η_basic 无修正'})"))
+                             f"{vfinal:.6f} Pa·s  ({tag_str})"))
                 rows.append(("雷诺数 Re", f"{re:.4f}"))
 
                 # 参考黏度对比（如果设置了）
                 ref_visc = viscosity_result.get("reference_viscosity_pa_s")
+                tags_display = tag_str  # reuse the same tag string from above
                 if ref_visc is not None and ref_visc > 0:
                     basic_err = abs(vb - ref_visc) / ref_visc * 100
-                    wall_err = abs(vw - ref_visc) / ref_visc * 100
-                    closer = "基础黏度 eta_basic" if basic_err <= wall_err else "壁面修正 eta_wall"
+                    final_err = abs(vfinal - ref_visc) / ref_visc * 100
+                    closer_label = "基础黏度 η_basic" if basic_err <= final_err else f"修正后 η_final ({tags_display})"
                     rows.append(("─" * 20, "──── 参考值对比 ────"))
                     rows.append(("参考黏度 η_ref", f"{ref_visc:.6f} Pa·s"))
                     rows.append(("基础黏度相对误差",
                                  f"{basic_err:.2f}%  (η_basic vs η_ref)"))
-                    rows.append(("壁面修正后相对误差",
-                                 f"{wall_err:.2f}%  (η_wall vs η_ref)"))
-                    rows.append(("参考值下更接近", closer))
+                    rows.append((f"修正后相对误差 ({tags_display})",
+                                 f"{final_err:.2f}%  (η_final vs η_ref)"))
+                    rows.append(("参考值下更接近", closer_label))
                 else:
                     rows.append(("─" * 20, "──── 参考值对比 ────"))
                     rows.append(("参考黏度 η_ref", "未设置参考值"))
                     rows.append(("基础黏度相对误差", "未设置参考值"))
-                    rows.append(("壁面修正后相对误差", "未设置参考值"))
+                    rows.append((f"修正后相对误差 ({tags_display})", "未设置参考值"))
 
                 # 提示信息
                 hints = self._build_result_hints(viscosity_result)
@@ -350,26 +371,37 @@ class ResultTabs(QTabWidget):
         """根据黏度结果构造提示信息。"""
         hints = []
         vb = viscosity_result.get('eta_basic_pa_s', 0)
-        vw = viscosity_result.get('eta_wall_pa_s', 0)
-        cf = viscosity_result.get('correction_factor', 1.0)
+        vw = viscosity_result.get('eta_wall_pa_s', vb)
+        vfinal = viscosity_result.get('eta_final_pa_s', vb)
+        wf = viscosity_result.get('wall_correction_factor', 1.0)
+        rf = viscosity_result.get('reynolds_factor', 1.0)
+        Re = viscosity_result.get('reynolds_number', 0)
         ref_visc = viscosity_result.get("reference_viscosity_pa_s")
 
-        # 提示 1: 修正因子过大
-        if cf > 1.10:
+        # 提示 1: 壁面修正因子过大
+        if wf > 1.10:
             hints.append(
-                "壁面修正因子较大 (>{:.2f})，建议核对量筒内径、小球半径和是否偏心下落。".format(1.10)
+                "壁面修正因子较大 ({:.4f} > 1.10)，建议核对量筒内径、"
+                "小球半径和是否偏心下落。".format(wf)
             )
 
-        # 提示 2: 有参考值时，检查基础值接近但修正后偏离
-        if ref_visc is not None and ref_visc > 0 and cf > 1.05:
+        # 提示 2: 雷诺数过大
+        if Re > 1.0:
+            hints.append(
+                "雷诺数 Re = {:.2f} > 1，超出 Oseen 修正有效范围 (Re ≲ 1)。\n"
+                "  建议使用更小直径的小球或更高黏度的液体。".format(Re)
+            )
+
+        # 提示 3: 有参考值时，检查基础值接近但综合修正后偏离
+        if ref_visc is not None and ref_visc > 0 and (wf > 1.05 or rf > 1.05):
             basic_err = abs(vb - ref_visc) / ref_visc * 100
-            wall_err = abs(vw - ref_visc) / ref_visc * 100
-            if wall_err > basic_err * 1.5 and basic_err < 10:
+            final_err = abs(vfinal - ref_visc) / ref_visc * 100
+            if final_err > basic_err * 1.5 and basic_err < 10:
                 hints.append(
-                    "当前基础黏度与参考值较接近 ({:.2f}%)，但壁面修正因子较大 ({:.4f})，"
-                    "修正后结果 ({:.2f}%) 偏低。结果对量筒内半径 R 极其敏感，"
-                    "请核准 R 是否为量筒内半径，并确认小球是否沿中心轴线下落。"
-                    .format(basic_err, cf, wall_err)
+                    "当前基础黏度与参考值较接近 ({:.2f}%)，但修正因子较大"
+                    " (壁面={:.4f}, 雷诺数={:.4f})，综合修正结果偏离 ({:.2f}%)。\n"
+                    "  可能是物理参数 (小球密度、液体密度、量筒半径) 有误，请核对。"
+                    .format(basic_err, wf, rf, final_err)
                 )
 
         return hints
