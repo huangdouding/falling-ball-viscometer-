@@ -305,7 +305,7 @@ class MainWindow(QMainWindow):
 
     def _on_calibration_points(self, p1, p2):
         """比例尺标定点已选。"""
-        px_dist = np.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        px_dist = abs(p2[1] - p1[1])  # 仅垂直距离（刻度在竖直方向）
         dialog = ScaleCalibrationDialog(p1, p2, px_dist, self)
         if dialog.exec() == ScaleCalibrationDialog.Accepted:
             scale = dialog.get_scale()
@@ -315,7 +315,7 @@ class MainWindow(QMainWindow):
                     f"[INFO] 比例尺标定完成\n"
                     f"  第一点: ({p1[0]}, {p1[1]})\n"
                     f"  第二点: ({p2[0]}, {p2[1]})\n"
-                    f"  像素距离: {px_dist:.1f} px\n"
+                    f"  垂直像素距离: {px_dist:.1f} px\n"
                     f"  比例尺: {scale:.6f} mm/px"
                 )
 

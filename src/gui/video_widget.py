@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QTimer, QPointF, QRect, QRectF
 from PySide6.QtGui import (
     QImage, QPixmap, QPainter, QPen, QColor, QFont,
-    QMouseEvent, QPaintEvent,
+    QMouseEvent, QPaintEvent, QWheelEvent,
 )
 
 
@@ -75,6 +75,14 @@ class VideoWidget(QWidget):
         self._debug_images = None   # dict from ball_detector debug_images
         self._debug_view_mode = 0   # 0=原图, 1=ROI, 2=灰度, 3=Mask, 4=轮廓, 5=最终标注
 
+        # ---- 缩放 ----
+        self._zoom_factor = 1.0        # 1.0 = 适配显示，>1 = 放大
+        self._pan_x = 0.0              # 平移偏移（显示坐标）
+        self._pan_y = 0.0
+        self._is_panning = False
+        self._pan_start_mouse = None   # 拖拽平移起点（屏幕坐标）
+        self._pan_start_xy = None      # 拖拽平移起点（pan_x, pan_y）
+
         # ---- 交互状态 ----
         self._mode = self.MODE_NONE
         self._drag_start = None     # QPointF 在 widget 坐标
@@ -104,6 +112,7 @@ class VideoWidget(QWidget):
         self._video_area.mouse_pressed.connect(self._on_mouse_press)
         self._video_area.mouse_moved.connect(self._on_mouse_move)
         self._video_area.mouse_released.connect(self._on_mouse_release)
+        self._video_area.wheel_zoomed.connect(self._on_wheel_zoomed)
         layout.addWidget(self._video_area, 1)
 
         # 播放控制栏
@@ -165,6 +174,27 @@ class VideoWidget(QWidget):
         self._debug_combo.currentIndexChanged.connect(self._on_debug_view_changed)
         tools.addWidget(self._debug_combo)
 
+        # 缩放控制
+        self._btn_zoom_in = QPushButton("⊕")
+        self._btn_zoom_in.setFixedSize(28, 24)
+        self._btn_zoom_in.setToolTip("放大（标定时用）")
+        self._btn_zoom_in.clicked.connect(lambda: self._zoom_relative(1.4))
+        self._btn_zoom_out = QPushButton("⊖")
+        self._btn_zoom_out.setFixedSize(28, 24)
+        self._btn_zoom_out.setToolTip("缩小")
+        self._btn_zoom_out.clicked.connect(lambda: self._zoom_relative(1 / 1.4))
+        self._btn_zoom_reset = QPushButton("1:1")
+        self._btn_zoom_reset.setFixedSize(32, 24)
+        self._btn_zoom_reset.setToolTip("重置缩放")
+        self._btn_zoom_reset.clicked.connect(self._zoom_reset)
+        self._zoom_label = QLabel("100%")
+        self._zoom_label.setFixedWidth(36)
+        self._zoom_label.setAlignment(Qt.AlignCenter)
+        tools.addWidget(self._btn_zoom_out)
+        tools.addWidget(self._btn_zoom_in)
+        tools.addWidget(self._btn_zoom_reset)
+        tools.addWidget(self._zoom_label)
+
         tools.addStretch()
         tools.addWidget(self._btn_prev)
         tools.addWidget(self._btn_next)
@@ -188,9 +218,58 @@ class VideoWidget(QWidget):
             self._offset_x = 0.0
             self._offset_y = 0.0
             return
-        self._scale = min(dw / vw, dh / vh)
-        self._offset_x = (dw - vw * self._scale) / 2.0
-        self._offset_y = (dh - vh * self._scale) / 2.0
+        base_scale = min(dw / vw, dh / vh)
+        self._scale = base_scale * self._zoom_factor
+        self._offset_x = (dw - vw * self._scale) / 2.0 + self._pan_x
+        self._offset_y = (dh - vh * self._scale) / 2.0 + self._pan_y
+
+    def _zoom_relative(self, factor: float, cursor_pos: QPointF = None):
+        """相对缩放，可指定光标位置作为缩放中心。"""
+        old_zoom = self._zoom_factor
+        new_zoom = old_zoom * factor
+        new_zoom = max(1.0, min(new_zoom, 20.0))
+        if abs(new_zoom - 1.0) < 0.001:
+            self._zoom_reset()
+            return
+
+        # 计算缩放中心对应的视频坐标
+        if cursor_pos is not None:
+            dw = self._video_area.width()
+            dh = self._video_area.height()
+            base = min(dw / max(self._video_w, 1), dh / max(self._video_h, 1))
+            cx, cy = cursor_pos.x(), cursor_pos.y()
+            # 缩放前该点对应的视频坐标
+            old_scale = base * old_zoom
+            old_ox = (dw - self._video_w * old_scale) / 2.0 + self._pan_x
+            old_oy = (dh - self._video_h * old_scale) / 2.0 + self._pan_y
+            vx = (cx - old_ox) / old_scale if old_scale > 0 else 0
+            vy = (cy - old_oy) / old_scale if old_scale > 0 else 0
+            # 缩放后调整 pan 使该视频点仍在光标位置
+            new_scale = base * new_zoom
+            new_ox = (dw - self._video_w * new_scale) / 2.0
+            new_oy = (dh - self._video_h * new_scale) / 2.0
+            self._pan_x = cx - vx * new_scale - new_ox
+            self._pan_y = cy - vy * new_scale - new_oy
+
+        self._zoom_factor = new_zoom
+        self._update_zoom_label()
+        # 更新光标
+        if self._mode == self.MODE_NONE:
+            self._video_area.setCursor(Qt.OpenHandCursor if new_zoom > 1.0 else Qt.ArrowCursor)
+        self._video_area.update()
+
+    def _zoom_reset(self):
+        """重置缩放到 1.0（适配显示）。"""
+        self._zoom_factor = 1.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        self._update_zoom_label()
+        if self._mode == self.MODE_NONE:
+            self._video_area.setCursor(Qt.ArrowCursor)
+        self._video_area.update()
+
+    def _update_zoom_label(self):
+        self._zoom_label.setText(f"{int(self._zoom_factor * 100)}%")
 
     def video_to_display(self, vx: float, vy: float):
         """视频坐标 → widget 显示坐标。"""
@@ -382,6 +461,15 @@ class VideoWidget(QWidget):
         """背景模型是否就绪。"""
         return self._background_ready
 
+    def _update_cursor(self):
+        """根据当前模式和缩放状态设置光标。"""
+        if self._mode != self.MODE_NONE:
+            self._video_area.setCursor(Qt.CrossCursor if self._mode in (self.MODE_ROI, self.MODE_CALIBRATE, self.MODE_SET_BALL) else Qt.ArrowCursor)
+        elif self._zoom_factor > 1.0:
+            self._video_area.setCursor(Qt.OpenHandCursor)
+        else:
+            self._video_area.setCursor(Qt.ArrowCursor)
+
     # ================================================================
     #  ROI
     # ================================================================
@@ -392,11 +480,11 @@ class VideoWidget(QWidget):
         if self._mode == self.MODE_ROI:
             self._mode = self.MODE_NONE
             self._btn_roi.setChecked(False)
-            self._video_area.setCursor(Qt.ArrowCursor)
+            self._update_cursor()
         else:
             self._mode = self.MODE_ROI
             self._btn_roi.setChecked(True)
-            self._video_area.setCursor(Qt.CrossCursor)
+            self._update_cursor()
             self._status.setText("在画面上拖动鼠标框选 ROI 区域")
 
     def _clear_roi(self):
@@ -432,7 +520,7 @@ class VideoWidget(QWidget):
             return
         self._mode = self.MODE_CALIBRATE
         self._calib_points = []
-        self._video_area.setCursor(Qt.CrossCursor)
+        self._update_cursor()
         self._status.setText("依次点击标尺的两个端点（起点 → 终点）")
 
     def _toggle_set_ball_mode(self):
@@ -442,12 +530,12 @@ class VideoWidget(QWidget):
         if self._mode == self.MODE_SET_BALL:
             self._mode = self.MODE_NONE
             self._btn_set_ball.setChecked(False)
-            self._video_area.setCursor(Qt.ArrowCursor)
+            self._update_cursor()
             self._status.setText("已退出「设置初始位置」模式")
         else:
             self._mode = self.MODE_SET_BALL
             self._btn_set_ball.setChecked(True)
-            self._video_area.setCursor(Qt.CrossCursor)
+            self._update_cursor()
             self._status.setText("请在小球中心位置点击一下")
 
     # ================================================================
@@ -505,6 +593,15 @@ class VideoWidget(QWidget):
     def _on_mouse_press(self, pos: QPointF):
         if self._frame_buffer is None:
             return
+
+        # 平移模式（放大后且无其他交互模式）
+        if self._zoom_factor > 1.0 and self._mode == self.MODE_NONE:
+            self._is_panning = True
+            self._pan_start_mouse = pos
+            self._pan_start_xy = (self._pan_x, self._pan_y)
+            self._video_area.setCursor(Qt.ClosedHandCursor)
+            return
+
         vx, vy = self.display_to_video(pos.x(), pos.y())
         if vx < 0 or vy < 0 or vx >= self._video_w or vy >= self._video_h:
             return
@@ -519,7 +616,7 @@ class VideoWidget(QWidget):
             self.ball_position_set.emit((int(vx), int(vy)))
             self._mode = self.MODE_NONE
             self._btn_set_ball.setChecked(False)
-            self._video_area.setCursor(Qt.ArrowCursor)
+            self._update_cursor()
             self._status.setText(f"初始小球位置已设置: ({int(vx)}, {int(vy)})")
             self._video_area.update()
 
@@ -529,22 +626,35 @@ class VideoWidget(QWidget):
                 self._status.setText(f"第一点: ({int(vx)}, {int(vy)})  请点击第二点")
             elif len(self._calib_points) == 2:
                 p1, p2 = self._calib_points
-                px_dist = np.hypot(p2[0] - p1[0], p2[1] - p1[1])
+                px_dist = abs(p2[1] - p1[1])  # 仅垂直距离
                 if px_dist < 5:
                     self._calib_points = []
                     self._status.setText("两点距离太近，请重新选择")
                     return
                 self.points_selected.emit(p1, p2)
                 self._mode = self.MODE_NONE
-                self._video_area.setCursor(Qt.ArrowCursor)
+                self._update_cursor()
             self._video_area.update()
 
     def _on_mouse_move(self, pos: QPointF):
+        if self._is_panning and self._pan_start_mouse is not None:
+            dx = pos.x() - self._pan_start_mouse.x()
+            dy = pos.y() - self._pan_start_mouse.y()
+            self._pan_x = self._pan_start_xy[0] + dx
+            self._pan_y = self._pan_start_xy[1] + dy
+            self._video_area.update()
+            return
         if self._mode == self.MODE_ROI and self._drag_start is not None:
             self._drag_end = pos
             self._video_area.update()
 
     def _on_mouse_release(self, pos: QPointF):
+        if self._is_panning:
+            self._is_panning = False
+            self._pan_start_mouse = None
+            self._pan_start_xy = None
+            self._update_cursor()
+            return
         if self._mode == self.MODE_ROI and self._drag_start is not None and self._drag_end is not None:
             x1, y1 = self.display_to_video(self._drag_start.x(), self._drag_start.y())
             x2, y2 = self.display_to_video(pos.x(), pos.y())
@@ -562,8 +672,18 @@ class VideoWidget(QWidget):
             self._drag_end = None
             self._mode = self.MODE_NONE
             self._btn_roi.setChecked(False)
-            self._video_area.setCursor(Qt.ArrowCursor)
+            self._update_cursor()
             self._video_area.update()
+
+    def _on_wheel_zoomed(self, event: QWheelEvent):
+        """滚轮缩放，以鼠标位置为中心。"""
+        if self._frame_buffer is None:
+            return
+        angle = event.angleDelta().y()
+        if angle == 0:
+            return
+        factor = 1.15 if angle > 0 else 1 / 1.15
+        self._zoom_relative(factor, event.position())
 
 # ====================================================================
 #  _VideoArea — 实际绘制区域
@@ -574,6 +694,7 @@ class _VideoArea(QWidget):
     mouse_pressed = Signal(object)
     mouse_moved = Signal(object)
     mouse_released = Signal(object)
+    wheel_zoomed = Signal(object)
 
     def __init__(self, parent: VideoWidget):
         super().__init__(parent)
@@ -797,3 +918,6 @@ class _VideoArea(QWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         self.mouse_released.emit(event.position())
+
+    def wheelEvent(self, event: QWheelEvent):
+        self.wheel_zoomed.emit(event)

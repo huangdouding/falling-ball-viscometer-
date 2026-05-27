@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "falling-ball-viscometer"
-version = "1.0.0"
+version = "1.1.2"
 description = "落球法液体黏度自动测量系统 — 基于机器视觉自动追踪与误差修正"
 readme = "README.md"
 requires-python = ">=3.8"

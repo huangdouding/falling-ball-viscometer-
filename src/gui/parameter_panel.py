@@ -183,6 +183,7 @@ class ParameterPanel(QScrollArea):
     clear_requested = Signal()
     config_saved = Signal(str)
     config_loaded = Signal(dict)
+    profile_changed = Signal(str)  # "720x1280" | "1080x1920" | "custom"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -232,6 +233,15 @@ class ParameterPanel(QScrollArea):
         fa.setSpacing(4)
 
         self._scale = ParamRow("比例尺", "mm/px", 0, 10000, 6, 0)
+
+        # 分辨率档位：切换时自动加载该档位保存的比例尺
+        self._profile_combo = NoWheelComboBox()
+        self._profile_combo.addItem("720×1280 (竖屏)", "720x1280")
+        self._profile_combo.addItem("1080×1920 (竖屏)", "1080x1920")
+        self._profile_combo.addItem("自定义", "custom")
+        self._profile_combo.setToolTip("切换分辨率档位，自动加载该档位保存的比例尺")
+        self._profile_combo.currentIndexChanged.connect(self._on_profile_changed)
+
         self._radius = ParamRow("小球半径", "mm", 0.01, 100, 3, 1.0)
         self._ball_dens = ParamRow("小球密度", "kg/m³", 100, 20000, 0, 7800)
         self._liq_dens = ParamRow("液体密度", "kg/m³", 100, 20000, 0, 1260)
@@ -252,6 +262,7 @@ class ParameterPanel(QScrollArea):
             f.addRow(row.label, row)
 
         add_row(fa, self._scale)
+        fa.addRow("档位:", self._profile_combo)
         add_row(fa, self._radius)
         add_row(fa, self._ball_dens)
         add_row(fa, self._liq_dens)
@@ -565,6 +576,25 @@ class ParameterPanel(QScrollArea):
         self._adv_btn.setText("▼ 高级设置" if checked else "▶ 高级设置")
 
     # ================================================================
+    #  分辨率档位
+    # ================================================================
+
+    def get_profile_key(self) -> str:
+        """返回当前档位键: "720x1280" / "1080x1920" / "custom" """
+        return self._profile_combo.currentData()
+
+    def set_profile_by_key(self, key: str):
+        """按 key 设置档位。"""
+        idx = self._profile_combo.findData(key)
+        if idx >= 0:
+            self._profile_combo.setCurrentIndex(idx)
+
+    def _on_profile_changed(self, idx: int):
+        key = self._profile_combo.itemData(idx)
+        if key:
+            self.profile_changed.emit(key)
+
+    # ================================================================
     #  强制提交所有 SpinBox 当前文本（解决 Qt 失焦前 value() 旧值问题）
     # ================================================================
     def commit_editors(self):
@@ -586,6 +616,7 @@ class ParameterPanel(QScrollArea):
         cfg = {
             # — 实验参数（标准字段，仅 mm 单位，无 SI 副本） —
             "scale_mm_per_px": scale,
+            "profile": self.get_profile_key(),
             "ball_radius_mm": self._radius.value(),
             "ball_density_kg_m3": self._ball_dens.value(),
             "liquid_density_kg_m3": self._liq_dens.value(),
@@ -716,6 +747,10 @@ class ParameterPanel(QScrollArea):
 
         # — 实验参数 —
         _set_d(self._scale, "scale_mm_per_px", default=0)
+        # 恢复档位
+        prof = _get(cfg, "profile", default=None)
+        if prof:
+            self.set_profile_by_key(prof)
         # ball_radius: 优先 mm，其次 m
         mm = _get(cfg, "ball_radius_mm")
         if mm is not None:
@@ -851,6 +886,16 @@ class ParameterPanel(QScrollArea):
 
         cfg = self.get_config()
         cfg = normalize_config_keys(cfg)
+
+        # 合并已保存的 scale_per_resolution，避免覆盖丢失
+        try:
+            with open(_SETTINGS_PATH, "r", encoding="utf-8") as _f:
+                _old = json.load(_f)
+            if "scale_per_resolution" in _old and "scale_per_resolution" not in cfg:
+                cfg["scale_per_resolution"] = _old["scale_per_resolution"]
+        except Exception:
+            pass
+
         try:
             os.makedirs(os.path.dirname(_SETTINGS_PATH), exist_ok=True)
             with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:

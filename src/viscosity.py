@@ -76,7 +76,6 @@ def compute_viscosity(
     """计算液体黏度。
 
     参数：
-        terminal_velocity_m_s: 终端速度 (m/s)，正值表示下落
         ball_radius_m: 小球半径 (m)
         ball_density_kg_m3: 小球密度 (kg/m³)
         liquid_density_kg_m3: 液体密度 (kg/m³)
@@ -144,10 +143,10 @@ def compute_viscosity(
     h = liquid_height_m
 
     if enable_wall_correction:
-        wall_factor = (1.0 + 2.4 * r / R) * (1.0 + 3.3 * r / h)
-        if wall_factor > 1.10:
+        wall_factor = (1.0 + 2.4 * r / R)
+        if wall_factor > 1.20:
             logger.warning(
-                "Wall correction factor is large (correction=%.4f > 1.10). "
+                "Wall correction factor is large (correction=%.4f > 1.20). "
                 "Check cylinder/ball dimensions or eccentric fall.",
                 wall_factor,
             )
@@ -163,7 +162,7 @@ def compute_viscosity(
             "Wall correction (Ladenburg-Faxen, divide correction):\n"
             "  r = %.6f m,  R = %.6f m,  h = %.6f m\n"
             "  r/R = %.6f,  r/h = %.6f\n"
-            "  wall_factor = (1+2.4·r/R)(1+3.3·r/h) = %.6f\n"
+            "  wall_factor = (1+2.4*r/R) = %.6f\n"
             "  eta_wall = eta_basic / wall_factor = %.6f Pa·s",
             r, R, h, r_over_R, r_over_h, wall_factor, eta_wall,
         )

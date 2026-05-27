@@ -9,8 +9,8 @@ center_band_left_ratio: 0.3
 center_band_right_ratio: 0.7
 color_mode: dark_ball_on_bright_bg
 cv_threshold: 0.08
-cylinder_radius_m: 0.02
-cylinder_radius_mm: 20.0
+cylinder_radius_m: 0.01
+cylinder_radius_mm: 10.0
 detect_method: auto
 enable_long_line_rejection: true
 expected_radius_px_max: 4.0

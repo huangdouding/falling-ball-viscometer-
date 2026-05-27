@@ -31,7 +31,7 @@ class ScaleCalibrationDialog(QDialog):
         grid.addWidget(QLabel(f"({p1[0]}, {p1[1]})"), 0, 1)
         grid.addWidget(QLabel("第二点坐标:"), 1, 0)
         grid.addWidget(QLabel(f"({p2[0]}, {p2[1]})"), 1, 1)
-        grid.addWidget(QLabel("像素距离:"), 2, 0)
+        grid.addWidget(QLabel("垂直像素距离:"), 2, 0)
         self._px_label = QLabel(f"{pixel_distance:.1f} px")
         grid.addWidget(self._px_label, 2, 1)
         layout.addWidget(info_group)
