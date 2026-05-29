@@ -118,6 +118,7 @@ class MainWindow(QMainWindow):
 
         # 参数面板信号
         self._param_panel.config_saved.connect(self._on_config_saved)
+        self._param_panel.profile_changed.connect(self._on_profile_changed)
 
     def _load_default_config(self):
         """尝试加载 config.yaml 默认值。"""
@@ -861,6 +862,29 @@ class MainWindow(QMainWindow):
     def _on_config_saved(self, path: str):
         """参数已保存到文件。"""
         self._result_tabs.append_log(f"[CONFIG] 参数已保存到: {os.path.normpath(path)}")
+
+    def _on_profile_changed(self, key: str):
+        """分辨率档位切换时，尝试加载该档位保存的比例尺。"""
+        if key == "custom":
+            return
+        try:
+            import json
+            from src.gui.parameter_panel import _SETTINGS_PATH
+            with open(_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+            per_res = settings.get("scale_per_resolution", {})
+            saved_scale = per_res.get(key)
+            if saved_scale and saved_scale > 0:
+                self._param_panel.set_config({"scale_mm_per_px": saved_scale})
+                self._result_tabs.append_log(
+                    f"[CONFIG] 档位 {key} → 加载保存的比例尺: {saved_scale:.6f} mm/px"
+                )
+            else:
+                self._result_tabs.append_log(
+                    f"[CONFIG] 档位 {key} 无保存的比例尺，请重新标定"
+                )
+        except Exception as e:
+            self._result_tabs.append_log(f"[WARN] 加载档位比例尺失败: {e}")
 
     # ---- 窗口事件 ----
     def closeEvent(self, event):

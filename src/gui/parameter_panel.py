@@ -896,6 +896,17 @@ class ParameterPanel(QScrollArea):
         except Exception:
             pass
 
+        # ★ 保存当前比例尺到当前分辨率档位
+        try:
+            _cur_scale = cfg.get("scale_mm_per_px")
+            _cur_profile = self.get_profile_key()
+            if _cur_scale and _cur_scale > 0 and _cur_profile and _cur_profile != "custom":
+                if "scale_per_resolution" not in cfg or cfg["scale_per_resolution"] is None:
+                    cfg["scale_per_resolution"] = {}
+                cfg["scale_per_resolution"][_cur_profile] = _cur_scale
+        except Exception:
+            pass
+
         try:
             os.makedirs(os.path.dirname(_SETTINGS_PATH), exist_ok=True)
             with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
