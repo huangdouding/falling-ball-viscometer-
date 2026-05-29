@@ -810,10 +810,10 @@ def process_video(video_path: str, config: dict, *, frame_callback=None) -> dict
                                 "frame": frame_idx,
                             })
                             startup_confirm_frames = int(config.get("startup_confirm_frames", 5))
-                            buf_max = startup_confirm_frames + 5
+                            startup_fb = int(config.get("startup_fallback_frames", 25))
+                            buf_max = max(startup_confirm_frames + 5, startup_fb)
                             if len(startup_buffer) > buf_max:
                                 startup_buffer.pop(0)
-                            startup_fb = int(config.get("startup_fallback_frames", 25))
                             if _startup_tracklet_confirmed(startup_buffer):
                                 startup_confirmed = True
                             elif len(startup_buffer) >= startup_fb:
