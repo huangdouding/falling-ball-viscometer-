@@ -88,6 +88,14 @@ class BallDetector:
         # ---------- ROI（使用 detect_roi 做物理裁剪，回退到 roi） ----------
         self.roi = config.get("roi")
         self.detect_roi = config.get("detect_roi")  # 窄检测带（frame 坐标）
+        # ★ 存储 ROI 大小，用于钳制搜索中心不超出图片范围
+        _crop = self.detect_roi if self.detect_roi is not None else self.roi
+        if _crop is not None and len(_crop) == 4:
+            self._roi_w = int(_crop[2])
+            self._roi_h = int(_crop[3])
+        else:
+            self._roi_w = None
+            self._roi_h = None
 
         # ---------- 预处理参数 ----------
         self.gaussian_blur_ksize = config.get("gaussian_blur_ksize", 5)
@@ -1557,7 +1565,16 @@ class BallDetector:
         if pred_x is not None:
             self._predicted_cx = pred_x
             self._predicted_cy = pred_y
+            # 钳制搜索中心到 ROI 范围内，防止预测飞出图片后自激
+            if self._roi_w is not None and self._roi_h is not None:
+                pred_x = max(0.0, min(pred_x, self._roi_w - 1.0))
+                pred_y = max(0.0, min(pred_y, self._roi_h - 1.0))
             self._search_center = (pred_x, pred_y)
+            # 根据速度动态扩大搜索窗口，防止球掉太快跑出搜索范围
+            _pred_vy = abs(self._velocity_y) if abs(self._velocity_y) > 0 else 0
+            if _pred_vy > self.search_win_y_down * 0.5:
+                _new_ydown = min(_pred_vy * 2 + 20, self._roi_h if self._roi_h else 99999)
+                self.search_win_y_down = max(self.search_win_y_down, _new_ydown)
         else:
             self._search_center = (cx, cy)
 

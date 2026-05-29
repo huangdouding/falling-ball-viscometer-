@@ -1487,6 +1487,11 @@ def _can_rescue_motion_candidate(candidate: dict, history: list, config: dict) -
     dy = cy - last["y"]
     dist = float(np.hypot(cx - last["x"], cy - last["y"]))
 
+    # 大间隙：重捕获场景全部放行（motion_gate 已处理）
+    frame_gap = int(candidate.get("frame", 0)) - int(last.get("frame", 0))
+    if frame_gap > 10:
+        return True
+
     dx_max = float(config.get("dx_max", 15))
     dy_back_tol = float(config.get("dy_back_tol", 3))
     dist_max = float(config.get("dist_max", config.get("max_jump_px", 35)))
@@ -1533,6 +1538,24 @@ def _motion_gate(candidate: dict, history: list, config: dict) -> tuple:
     dx = abs(cx - last["x"])
     dy = cy - last["y"]
     dist = float(np.hypot(cx - last["x"], cy - last["y"]))
+
+    # 如果上次有效帧和当前候选帧差距太大（重捕获场景），
+    # 说明球已经掉出去很远，用紧的门控只会误杀，全部放行。
+    # ★ 注意：x 约束不放松（防止跳到旁边的干扰特征），只放松 y/距离。
+    frame_gap = int(candidate.get("frame", 0)) - int(last.get("frame", 0))
+    if frame_gap > 10:
+        tol_scale = 3.5
+        dx_max = float(config.get("dx_max", 15)) * tol_scale
+        dy_back_tol = float(config.get("dy_back_tol", 3)) * tol_scale
+        dist_max = float(config.get("dist_max", 35)) * tol_scale
+        reasons = []
+        if dx > dx_max:
+            reasons.append(f"dx={dx:.1f}>{dx_max:.1f}")
+        if dy < -dy_back_tol:
+            reasons.append(f"dy_back={dy:.1f}<-{dy_back_tol:.1f}")
+        if dist > dist_max:
+            reasons.append(f"dist={dist:.1f}>{dist_max:.1f}")
+        return len(reasons) == 0, " | ".join(reasons), dist
 
     tol_scale = _tracking_tolerance_scale(history, config)
     dx_max = float(config.get("dx_max", 15))
@@ -1645,7 +1668,16 @@ def _select_motion_consistent_detection(
             -float(c.get("diff_score", 0.0)),
         ))
     else:
-        candidates.sort(key=lambda c: (c["_pred_error"], -float(c.get("diff_score", 0.0)), -float(c.get("score", 0.0))))
+        last_y = history[-1]["y"]
+        for c in candidates:
+            c["_dy"] = float(c["y_px"]) - last_y
+        candidates.sort(key=lambda c: (
+            c["_pred_error"],
+            # ★ y 单调：优先选 dy>0（球往下掉）的候选，排除 y 回跳的
+            0 if c["_dy"] >= -float(config.get("dy_back_tol", 3)) * 0.5 else 1,
+            -float(c.get("diff_score", 0.0)),
+            -float(c.get("score", 0.0)),
+        ))
     return candidates[0]
 
 
@@ -1738,6 +1770,9 @@ def _remove_trajectory_outliers(df: pd.DataFrame, config: dict) -> pd.DataFrame:
       - y 方向不回跳 (或 ≤ dy_back_tol)
       - 帧间距离 ≤ dist_max (px)
       - 超出下落中心线/ROI 中心通道的剔除
+      - y 单调性检查：在滑动窗口内 y 应持续下降（ball falling），
+        不允许出现 y 明显回跳（>dy_back_tol）后又被接受的点。
+        此约束防止两个 x 位置来回跳时把上方的错误点也纳入轨迹。
 
     剔除的点被设 x_px/y_px = NaN, valid = False，不参与后续统计和绘图。
     """
@@ -1780,6 +1815,9 @@ def _remove_trajectory_outliers(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     last_good_frame = None
     removed = 0
     reason_counts = {}
+    # ★ y 单调滑动窗口：记录最近接受的 y 值，用于趋势检查
+    _recent_accepted_ys = []
+    _max_trend_window = int(config.get("trend_window_frames", 10))
 
     for idx in idx_all:
         x = x_num.at[idx]
@@ -1799,6 +1837,30 @@ def _remove_trajectory_outliers(df: pd.DataFrame, config: dict) -> pd.DataFrame:
         if axis_x is not None and abs(x - axis_x) > max_x_drift_px:
             outlier = True
             reasons.append(f"outside_fall_axis(|x-{axis_x:.1f}|>{max_x_drift_px:.1f})")
+
+        # ★ x 稳定性约束：在滑动窗口内 x 不应大幅跳变，
+        #   防止两个特征交替出现时把错误点混入轨迹。
+        if not outlier and len(_recent_accepted_ys) >= 5:
+            _recent_xs = [
+                x_num.at[oidx] for oidx in idx_all
+                if oidx < idx and x_num.at[oidx] is not None and not pd.isna(x_num.at[oidx])
+            ][-10:]
+            if len(_recent_xs) >= 5:
+                _x_median = float(np.median(_recent_xs))
+                _x_mad = float(np.median([abs(v - _x_median) for v in _recent_xs]))
+                # 如果 x 偏离中位数超过 dx_max*1.5 且远超 MAD → 大概率跳到了错误特征
+                _x_dev = abs(x - _x_median)
+                if _x_dev > max(dx_max * 3.0, _x_mad * 6.0, 30.0):
+                    outlier = True
+                    reasons.append(f"x_jitter(x={x:.0f},median={_x_median:.0f},dev={_x_dev:.1f})")
+
+        # ★ y 单调趋势约束：在滑动窗口内 y 应有持续下降趋势（ball falling）。
+        #   如果当前 y 明显高于窗口内最低 y（爬升），说明可能跳到了上方的错误点。
+        if not outlier and len(_recent_accepted_ys) >= 5:
+            _min_y = min(_recent_accepted_ys[-5:])
+            if y < _min_y - dy_back_tol * 3:
+                outlier = True
+                reasons.append(f"y_climb(y={y:.0f},min_recent={_min_y:.0f},diff={_min_y - y:.0f})")
 
         # 帧间跳变 — 大间隙后重置参考点，避免与过期位置比较
         gap_frames = idx - last_good_frame if last_good_frame is not None else 0
@@ -1839,6 +1901,9 @@ def _remove_trajectory_outliers(df: pd.DataFrame, config: dict) -> pd.DataFrame:
             last_good_x = x
             last_good_y = y
             last_good_frame = idx
+            _recent_accepted_ys.append(y)
+            if len(_recent_accepted_ys) > _max_trend_window:
+                _recent_accepted_ys.pop(0)
 
     if removed > 0:
         logger.info(
