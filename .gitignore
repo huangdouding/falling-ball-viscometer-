@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv*/
+venv*/
+.python-version
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code local settings (personal)
+.claude/settings.local.json
+
+# Data / results
+data/results/
+data/videos/
+**/results/
+
+# Videos (large files)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+
+# Config copies (auto-generated during analysis)
+**/config_used.yaml
+**/config_copy.yaml
+
+# B1 debug images (generated / experimental)
+B1/*.png
+B1/*.jpg
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Agent skills (pre-installed Claude Code skills)
+.agents/skills/
