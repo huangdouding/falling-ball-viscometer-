@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python detect_ball.py --image \"图片1.jpg\")",
-      "Bash(python detect_ball.py --image temp_input.jpg)"
-    ]
-  }
-}
